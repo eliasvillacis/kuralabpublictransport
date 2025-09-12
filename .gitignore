@@ -1,0 +1,17 @@
+# Ignore local environment files that contain secrets
+.env
+
+# Ignore generated files and directories
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore system files
+.DS_Store
+.vscode/
+
+# Keep .env.example
+# The file below is intentionally not ignored
+!.env.example
