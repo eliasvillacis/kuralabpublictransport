@@ -9,7 +9,6 @@
   <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
   <img alt="focus"  src="https://img.shields.io/badge/focus-transit%20insights-6aa84f?style=flat-square">
   <img alt="battery" src="https://img.shields.io/badge/battery-friendly-ffd966?style=flat-square">
-  <img alt="license" src="https://img.shields.io/badge/license-MIT-888?style=flat-square">
 </p>
 
 ---
@@ -73,14 +72,16 @@ for drivers, continuous gps isn’t an issue — cars have chargers and dashboar
 
 ## 🏗️ High-Level Architecture  
 
-**Supervisor-led Agent-to-Agent (A2A)** flow:
+```
 User → Supervisor (router + compiler)
-|-- Maps Agent → routes + ETAs
-|-- Traffic Agent → incidents + congestion
-|-- Transit Agent → trip updates + delays
-|-- Weather Agent → hazard flags
-|-- Notifier Agent → SMS/voice alerts
-→ Supervisor → final conversational answer
+    ├─ Maps Agent     → routes + ETAs
+    ├─ Traffic Agent  → incidents + congestion
+    ├─ Transit Agent  → trip updates + delays
+    ├─ Weather Agent  → hazard flags
+    └─ Notifier Agent → SMS/voice alerts
+          ↓
+       Final conversational answer
+```
 
 
 ### 🔹 Specialists  
