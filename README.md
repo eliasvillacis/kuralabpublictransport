@@ -1,105 +1,119 @@
-# Civic Challenge: Smarter Transit Guidance
+# Civic Challenge: Smarter Transit Guidance  
+
+> **Walk With Me** — A lightweight conversational GPS that complements existing navigation apps.  
+> Real-time transit insights, accessibility updates, and proactive notifications — without draining your battery.
 
 
 ## Problem
-Modern navigation apps excel at finding the fastest routes, but a rider’s journey is about more than speed. True reliability can be disrupted by subway delays, bus bunching, elevator outages, or temporary street/exit closures—factors that are especially critical for accessibility. Popular apps also rely on continuous GPS tracking, which can drain a device’s battery during longer trips. This project proposes a **Conversational GPS**: an assistant that complements existing navigation by delivering deeper real-time insights in natural language, helping riders travel with more confidence and equity, while being mindful of battery life.
+Modern navigation apps excel at finding the fastest routes, but a rider’s journey is about more than speed. True reliability can be disrupted by subway delays, bus bunching, elevator outages, or temporary street/exit closures—factors that are especially critical for accessibility.
 
+For drivers, running a full navigation app is rarely an issue: cars often supply charging through built-in systems, and platforms like CarPlay or Android Auto handle continuous GPS in the background.
+
+But **commuters and transit riders face different constraints**. Keeping a navigation app open drains phone batteries quickly, and many don’t have reliable charging access during long trips. Riders need a lighter alternative: one that surfaces critical insights — delays, hazards, accessibility — **without requiring a map to run in the background the whole time**.
+
+This project proposes a **Conversational GPS**: a lightweight assistant that complements (not competes with) existing navigation apps. Instead of replacing Google Maps or Citymapper, it supplements them by delivering real-time insights in natural language. Riders can interact with the assistant to surface **delays, hazards, and accessibility context**, while still relying on their preferred visual navigation app for turn-by-turn guidance.
+
+Users can also receive proactive updates through **Twilio SMS/voice notifications**, keeping them informed without needing to constantly reopen a map app. The goal is not to replicate full GPS navigation but to enhance it — helping riders travel with more confidence, clarity, and equity while being mindful of device battery life.
 
 ## Challenge Statement
-**How can we deliver a reliable, accessible, and battery-efficient Conversational GPS that surfaces real-time delays, closures, and hazards in one assistant?**
+**How can we deliver a reliable, accessible, and battery-efficient Conversational GPS that surfaces real-time delays, closures, hazards, and weather context in one assistant?**
 
 ## Agent Goals
 - Understand natural language requests (e.g., “get me from Astoria to Battery Park, avoid delays”).
 - Pull live signals from real-world data sources.
 - Compare candidate routes against those signals.
-- Recommend the best route with clear rationale and caveats.
-
+- Provide conversational answers with clear rationale and caveats.
+- Push proactive updates to users via Twilio.
+- Act as a supplement to existing map/navigation apps, not a replacement.
 
 ## Who Benefits
-- Daily commuters, students, and tourists.
-- Riders needing fewer transfers or accessible stations.
-- City agencies aiming to reduce crowding and improve awareness.
-
+- **Transit commuters** who can’t keep their map apps open all day.
+- **Students and tourists** unfamiliar with local service patterns.
+- **Accessibility-focused riders** needing elevator/outage updates.
+- **City agencies** aiming to reduce crowding and improve awareness.
+- **Drivers (secondary use):** while drivers typically have chargers and in-car systems, the same architecture could extend to **lightweight voice/SMS alerts** for road closures, incidents, or weather.
 
 ## Success Metrics
 - **Accuracy:** Route meets predicted ETA window.
-- **Quality:** Recommended route matches btbaseline (e.g., Google Maps ETA) ≥70% of the time.
+- **Quality:** Recommended route matches baseline (e.g., Google Maps ETA) ≥70% of the time.
 - **Clarity:** Users rate explanations ≥4/5.
 - **Reliability:** p95 latency under 3.5s, error rate under 2%.
 
-
 ---
 
-
 ## High-Level Architecture
-This project uses a modular, multi-agent system with a straightforward Agent-to-Agent (A2A) architecture. Each agent specializes in a task and communicates directly with the others. This design avoids the overhead of a separate communication server while allowing us to swap or extend components easily.
 
+This project uses a **Supervisor-led Agent-to-Agent (A2A)** architecture. The **Supervisor** serves as the main communicator — handling **routing** (intent classification), **coordination** (delegating tasks to specialists), and **compilation** (merging outputs into a coherent response).
 
-- **Router:** Classifies user intent and delegates queries.
-- **Maps Agent:** Provides directions and ETAs (Google Routes API).
-- **Traffic Agent:** Retrieves incidents and congestion data.
-- **Transit Agent:** Monitors GTFS-RT delays and vehicle positions (Transitland).
-- **Weather Agent:** Flags hazards affecting travel time (OpenWeather).
-- **Composer:** Merges results, ranks routes, and provides the final answer with rationale.
-
+### Specialists
+- **Maps Agent (`maps.py`)** — Provides directions and ETAs (Google Routes API).
+- **Traffic Agent (`traffic.py`)** — Retrieves incidents and congestion data.
+- **Transit Agent (`transit.py`)** — Monitors GTFS-RT delays and vehicle positions (Transitland).
+- **Weather Agent (`weather.py`)** — Flags hazards affecting travel time (OpenWeather).
+- **Notifier Agent (Twilio)** — Sends SMS/voice alerts for proactive updates.
 
 **Data Flow:**
 ```
-User → Router
-|-- Maps Agent → routes + ETAs + polylines
-|-- Traffic Agent → incidents + congestion
-|-- Transit Agent → trip updates + delays
-|-- Weather Agent → hazard flags
-→ Composer/Ranker → Final Answer + Rationale
+User → Supervisor (router + compiler)
+    |-- Maps Agent → routes + ETAs + polylines
+    |-- Traffic Agent → incidents + congestion
+    |-- Transit Agent → trip updates + delays
+    |-- Weather Agent → hazard flags
+    |-- Notifier Agent → SMS/voice alerts
+→ Supervisor (final composition) → Conversational Answer
 ```
 
-
 ### Data Sources
-- **Routing:** Google Routes API — global routing with traffic-aware ETAs.
-- **Transit:** Transitland REST API — aggregated GTFS-RT feeds for real-time delays and vehicle positions.
+- **Routing:** Google Routes API — traffic-aware ETAs.
+- **Transit:** Transitland REST API — GTFS-RT feeds for delays and vehicle positions.
 - **Weather:** OpenWeather API — forecasts, conditions, and hazard alerts.
-
+- **Messaging:** Twilio API — SMS and voice notifications.
 
 ---
 
+## Visual Layer (Optional, Back Pocket)
+
+While the core experience is conversational, **visual context is important for navigation**. This project includes the option for a **lightweight visual pane** to complement the assistant:
+
+- Built with **Leaflet or MapLibre**.
+- Renders JSON from the Supervisor:
+  - Route polylines.
+  - Incident markers (e.g., delays, closures).
+  - Accessibility icons for stations.
+  - Weather overlays or alerts.
+- Includes a **“Open in Google Maps”** button for turn-by-turn navigation.
+- Can also generate **static map images** or **deep links** for Twilio SMS updates.
+
+This ensures the product stays **lightweight and supplemental** — enhancing core map apps rather than duplicating their functionality.
+
+---
 
 ## Technical Design Rationale
 
-
-### Why A2A (Agent-to-Agent)
-- **Simplicity:** One Python backend, easier to scale and maintain.
-- **Fewer Moving Parts:** No separate communication server.
-- **Performance:** Direct API calls keep latency low.
-- **Security:** API keys managed centrally on the backend.
-- **Cost:** Fewer services = lower cost.
-
+### Why A2A (Supervisor-led)
+- **Simplicity:** All logic centralized in one Python backend.
+- **Supervisor Control:** Single orchestrator reduces complexity.
+- **Performance:** Direct agent calls keep latency low.
+- **Security:** API keys handled in one place.
+- **Cost:** Minimal infrastructure overhead.
 
 ### When to Consider MCP or Hybrid
-- **MCP (Model Context Protocol):** Useful for centralized tool access and logging, especially if multiple teams or agents share the same external APIs.
-- **Hybrid (A2A + MCP):** Combines A2A’s flexibility with MCP’s centralized governance and scalability. Ideal for enterprise-scale deployments where reliability, auditing, and security are critical.
+- **MCP (Model Context Protocol):** Best for standardized governance, shared tools, and observability at enterprise scale.
+- **Hybrid (A2A + MCP):** A future option if scaling requires centralized logging, auditing, or compliance.
 
-
-For this project, A2A is the best fit: fast to prototype, resilient, and easy to reason about. A hybrid model could be explored later for production scaling.
-
+For this prototype, **Supervisor-led A2A** is the right fit: fast to build, resilient, and easy to reason about. For production, MCP or hybrid integration could be explored.
 
 ---
-
 
 ## LangChain vs LangGraph
 
-
 ### Why LangChain
-- **Modular Components:** Agents, tools, and chains can be combined cleanly.
-- **Agent Tools:** Easy to wrap APIs (Google Routes, Transitland, OpenWeather) as tools for specialized agents.
-- **Simplicity:** Perfect for our linear flow (query → agents → composer → answer).
-
+- **Modular:** Easy to wrap each specialist as a tool.
+- **Linear Flow:** Perfect for request → agents → supervisor → answer.
+- **Ease of Prototyping:** Keeps development simple and fast.
 
 ### Why Not LangGraph (Here)
-- **Optimized for Non-Linear Workflows:** LangGraph shines when agents need to loop, retry, or backtrack.
-- **Extra Overhead:** Requires defining nodes/edges/state transitions, unnecessary for our straightforward pipeline.
+- **Extra Overhead:** Defining nodes/edges/state adds complexity.
+- **Non-Linear Focus:** Better suited for workflows requiring retries, loops, or backtracking.
 
-
-**Bottom line:** LangChain gives us all we need to implement this linear, multi-agent system without added complexity.
-
-
----
+**Bottom line:** LangChain supports our current linear system well; LangGraph may be revisited if future workflows demand more complex orchestration.
