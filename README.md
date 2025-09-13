@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">✨ Walk With Me ✨</h1>
-<p align="center"><i>your lightweight conversational gps — built to guide, not drain 🔋</i></p>
+<p align="center"><i>a lightweight conversational gps — built to guide, not drain 🔋</i></p>
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
@@ -127,4 +127,5 @@ while the heart is conversational, a lightweight visual pane can:
 👉 for this prototype: **LangChain** keeps it fast, lean, and easy to extend.  
 
 ---
+
 
