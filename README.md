@@ -1,25 +1,8 @@
-<p align="center">```
-📂 agents/
-  ├</p>rvisor.py     # Main orchestrator
-  └─ 📂 sp---
-
-## 🚀 Getting Started
-1. Clone the repositorylists/
-     ├─ 🗺️ maps.py       # Location & routing
-     ├─ 🚦 traffic.py    # Traffic conditions
-     ├─ 🚇 transit.py    # Public transit
-     └─ 🌤️ weather.py    # Weather conditions
-📂 utils/
-  └─ 📝 logger.py        # Logging utilities
-```c="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
+<p align="center">
+  <img src="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
 </p>
 
 <h1 align="center">🚉 Vaya 🗺️</h1>
-
-<p align="center">
-  <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
-  <img alt="focus"  src="https://img.shields.io/badge/focus-smart%20routing-6aa84f?style=flat-square">
-</p>
 
 ## 🛠️ Technical Stack
 - 🤖 **AI Engine**: Google Gemini for natural language understanding
@@ -52,7 +35,8 @@
 ---
 
 <p align="center">
-  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>
+  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>  
+  <br>— all without draining your phone battery —
 </p>
 
 <p align="center">
@@ -129,6 +113,16 @@ User → Supervisor (router + compiler)
           ↓
        Final conversational answer
 ```
+
+
+### 🔹 Specialists  
+- 🗺️ **maps.py** → directions & ETAs (Google Routes)  
+- 🚦 **traffic.py** → incidents & congestion  
+- 🚇 **transit.py** → GTFS-RT trip updates (Transitland)  
+- 🌦️ **weather.py** → hazard flags (OpenWeather)  
+- 📲 **notifier** → proactive sms/voice (Twilio)  
+
+---
 
 ## 🗺️ Visual Layer (Optional)  
 while the heart is conversational, a lightweight visual pane can:  
