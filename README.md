@@ -8,7 +8,6 @@
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-prototype-blue">
   <img alt="focus"  src="https://img.shields.io/badge/focus-transit%20insights-6aa84f">
-  <img alt="battery" src="https://img.shields.io/badge/battery-friendly-ffd966">
 </p>
 
 <blockquote>
@@ -133,6 +132,7 @@ For this prototype, **Supervisor-led A2A** is the right fit: fast to build, resi
 
 
 **Bottom line:** LangChain supports our current linear system well; LangGraph may be revisited if future workflows demand more complex orchestration.
+
 
 
 
