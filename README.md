@@ -20,39 +20,6 @@
 
 ---
 
-<table>
-<tr>
-<td width="50%">
-
-### why it’s different
-- 🗣️ **conversational** prompts + replies  
-- 🧭 **augments** your current maps app  
-- 🔕 **battery-aware** background checks  
-- ♿ **accessibility-first** alerts
-
-</td>
-<td width="50%">
-
-### what you get
-- 🚇 delay + elevator outage pings  
-- 🚌 bus bunching heads-up  
-- 📍 “what’s the best exit?” quick answers  
-- 🔔 proactive, low-noise notifications
-
-</td>
-</tr>
-</table>
-
----
-
-### quick look
-- “_tell me if the A train is delayed at Hoyt-Schermerhorn_”
-- “_alert me if the 14th St elevator goes down before 6pm_”
-- “_which exit at Times Sq is closest to the NQR platform?_”
-
-
-
-
 ## Problem
 Modern navigation apps excel at finding the fastest routes, but a rider’s journey is about more than speed. True reliability can be disrupted by subway delays, bus bunching, elevator outages, or temporary street/exit closures—factors that are especially critical for accessibility.
 
@@ -167,5 +134,6 @@ For this prototype, **Supervisor-led A2A** is the right fit: fast to build, resi
 
 
 **Bottom line:** LangChain supports our current linear system well; LangGraph may be revisited if future workflows demand more complex orchestration.
+
 
 
