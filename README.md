@@ -1,8 +1,55 @@
-# **Walk With Me** — A lightweight conversational GPS that complements existing navigation apps. 
+<p align="center">
+  <img src="https://img.shields.io/badge/Walk%20With%20Me-🚶-black?labelColor=222" alt="Walk With Me" />
+</p>
 
-> Real-time transit insights, accessibility updates, and proactive notifications — without draining your battery.
-> 
-> Civic Challenge: Smarter Transit Guidance   
+<h1 align="center">Walk With Me</h1>
+<p align="center"><i>A lightweight conversational GPS that complements existing navigation apps.</i></p>
+
+<p align="center">
+  <img alt="status" src="https://img.shields.io/badge/status-prototype-blue">
+  <img alt="focus"  src="https://img.shields.io/badge/focus-transit%20insights-6aa84f">
+  <img alt="battery" src="https://img.shields.io/badge/battery-friendly-ffd966">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-888">
+</p>
+
+<blockquote>
+<b>Tagline:</b> Real-time transit insights, accessibility updates, and proactive notifications — without draining your battery.
+</blockquote>
+
+<p><b>Civic Challenge:</b> <i>Smarter Transit Guidance</i></p>
+
+---
+
+<table>
+<tr>
+<td width="50%">
+
+### why it’s different
+- 🗣️ **conversational** prompts + replies  
+- 🧭 **augments** your current maps app  
+- 🔕 **battery-aware** background checks  
+- ♿ **accessibility-first** alerts
+
+</td>
+<td width="50%">
+
+### what you get
+- 🚇 delay + elevator outage pings  
+- 🚌 bus bunching heads-up  
+- 📍 “what’s the best exit?” quick answers  
+- 🔔 proactive, low-noise notifications
+
+</td>
+</tr>
+</table>
+
+---
+
+### quick look
+- “_tell me if the A train is delayed at Hoyt-Schermerhorn_”
+- “_alert me if the 14th St elevator goes down before 6pm_”
+- “_which exit at Times Sq is closest to the NQR platform?_”
+
 
 
 
@@ -120,4 +167,5 @@ For this prototype, **Supervisor-led A2A** is the right fit: fast to build, resi
 
 
 **Bottom line:** LangChain supports our current linear system well; LangGraph may be revisited if future workflows demand more complex orchestration.
+
 
