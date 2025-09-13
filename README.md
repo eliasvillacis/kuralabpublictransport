@@ -1,21 +1,58 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Walk%20With%20Me-🚶‍♀️-222222?style=for-the-badge" alt="Walk With Me" />
+<p align="center">```
+📂 agents/
+  ├</p>rvisor.py     # Main orchestrator
+  └─ 📂 sp---
+
+## 🚀 Getting Started
+1. Clone the repositorylists/
+     ├─ 🗺️ maps.py       # Location & routing
+     ├─ 🚦 traffic.py    # Traffic conditions
+     ├─ 🚇 transit.py    # Public transit
+     └─ 🌤️ weather.py    # Weather conditions
+📂 utils/
+  └─ 📝 logger.py        # Logging utilities
+```c="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
 </p>
 
-<h1 align="center">✨ Walk With Me ✨</h1>
-<p align="center"><i>a lightweight conversational gps — built to guide, not drain 🔋</i></p>
+<h1 align="center">🚉 Vaya 🗺️</h1>
 
 <p align="center">
   <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
-  <img alt="focus"  src="https://img.shields.io/badge/focus-transit%20insights-6aa84f?style=flat-square">
-  <img alt="battery" src="https://img.shields.io/badge/battery-friendly-ffd966?style=flat-square">
+  <img alt="focus"  src="https://img.shields.io/badge/focus-smart%20routing-6aa84f?style=flat-square">
+</p>
+
+## 🛠️ Technical Stack
+- 🤖 **AI Engine**: Google Gemini for natural language understanding
+- 🗺️ **Location Services**: Google Maps API for routing
+- 🚇 **Transit Data**: Transitland API for real-time updates
+- 🔄 **Architecture**: Multi-agent system with specialized components
+
+## 🏗️ Project Structure
+```
+📂 agents/
+  ├─ 🎭 supervisor.py     # Main orchestrator
+  └─ 📂 specialists/
+     ├─ 🗺️ maps.py       # Location & routing
+     ├─ 🚦 traffic.py    # Traffic conditions
+     ├─ 🚇 transit.py    # Public transit
+     └─ 🌤️ weather.py    # Weather conditions
+📂 utils/
+  └─ 📝 logger.py        # Logging utilities
+```io/badge/TransitTalk-�-222222?style=for-the-badge" alt="TransitTalk" />
+</p>
+
+<h1 align="center">✨ TransitTalk ✨</h1>
+<p align="center"><i>Your intelligent transit companion �</i></p>
+
+<p align="center">
+  <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
+  <img alt="focus"  src="https://img.shields.io/badge/focus-smart%20routing-6aa84f?style=flat-square">
 </p>
 
 ---
 
 <p align="center">
-  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>  
-  <br>— all without draining your phone battery —
+  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>
 </p>
 
 <p align="center">
@@ -53,12 +90,22 @@ for drivers, continuous gps isn’t an issue — cars have chargers and dashboar
 
 ---
 
-## 👥 Who Benefits  
-- 🚇 **daily commuters** without constant charging access  
-- 🎒 **students & tourists** new to the system  
-- ♿ **accessibility-focused riders** needing outage alerts  
-- 🏙️ **city agencies** aiming to reduce crowding & improve awareness  
-- 🚗 **drivers (secondary)**: lightweight sms/voice alerts for road closures, incidents, or weather  
+## � Getting Started
+1. Clone the repository
+2. Create a `.env` file with your API keys:
+   ```
+   GOOGLE_GENAI_API_KEY=your_key
+   GOOGLE_CLOUD_API_KEY=your_key
+   TRANSITLAND_API_KEY=your_key
+   ```
+3. Install dependencies: `pip install -r requirements.txt`
+4. Run the assistant: `python main.py`
+
+## 🎯 Use Cases
+- 🎒 **Commuters**: Get real-time updates about your regular routes
+- 🏃 **Tourists**: Navigate unfamiliar transit systems with ease
+- ♿ **Accessibility Users**: Stay informed about elevator status and accessible routes
+- 🌧️ **Weather-conscious**: Get route recommendations based on current conditions
 
 ---
 
@@ -82,16 +129,6 @@ User → Supervisor (router + compiler)
           ↓
        Final conversational answer
 ```
-
-
-### 🔹 Specialists  
-- 🗺️ **maps.py** → directions & ETAs (Google Routes)  
-- 🚦 **traffic.py** → incidents & congestion  
-- 🚇 **transit.py** → GTFS-RT trip updates (Transitland)  
-- 🌦️ **weather.py** → hazard flags (OpenWeather)  
-- 📲 **notifier** → proactive sms/voice (Twilio)  
-
----
 
 ## 🗺️ Visual Layer (Optional)  
 while the heart is conversational, a lightweight visual pane can:  
