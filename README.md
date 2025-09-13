@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.s➡️ riders need a **smart companion**: one that surfaces critical insights and helps navigate transit systems effectively.lds.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
+  <img src="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
 </p>
 
 <h1 align="center">🚉 Vaya 🗺️</h1>
