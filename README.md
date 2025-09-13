@@ -1,6 +1,7 @@
 # **Walk With Me** — A lightweight conversational GPS that complements existing navigation apps. 
 
 > Real-time transit insights, accessibility updates, and proactive notifications — without draining your battery.
+> 
 > Civic Challenge: Smarter Transit Guidance   
 
 
@@ -119,3 +120,4 @@ For this prototype, **Supervisor-led A2A** is the right fit: fast to build, resi
 
 
 **Bottom line:** LangChain supports our current linear system well; LangGraph may be revisited if future workflows demand more complex orchestration.
+
