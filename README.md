@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
+  <img src="https://img.s➡️ riders need a **smart companion**: one that surfaces critical insights and helps navigate transit systems effectively.lds.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
 </p>
 
 <h1 align="center">🚉 Vaya 🗺️</h1>
@@ -21,22 +21,12 @@
      └─ 🌤️ weather.py    # Weather conditions
 📂 utils/
   └─ 📝 logger.py        # Logging utilities
-```io/badge/TransitTalk-�-222222?style=for-the-badge" alt="TransitTalk" />
-</p>
-
-<h1 align="center">✨ TransitTalk ✨</h1>
-<p align="center"><i>Your intelligent transit companion �</i></p>
-
-<p align="center">
-  <img alt="status" src="https://img.shields.io/badge/status-prototype-blue?style=flat-square">
-  <img alt="focus"  src="https://img.shields.io/badge/focus-smart%20routing-6aa84f?style=flat-square">
-</p>
+```
 
 ---
 
 <p align="center">
-  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>  
-  <br>— all without draining your phone battery —
+  🚇 <b>real-time transit insights</b> • ♿ <b>accessibility-first updates</b> • 🔔 <b>proactive notifications</b>
 </p>
 
 <p align="center">
@@ -74,7 +64,7 @@ for drivers, continuous gps isn’t an issue — cars have chargers and dashboar
 
 ---
 
-## � Getting Started
+## 🚀 Getting Started
 1. Clone the repository
 2. Create a `.env` file with your API keys:
    ```
@@ -155,8 +145,4 @@ while the heart is conversational, a lightweight visual pane can:
 - **LangChain**: modular, linear flow, great for prototyping  
 - **LangGraph**: powerful but heavier, best for retries/loops/backtracking  
 
-👉 for this prototype: **LangChain** keeps it fast, lean, and easy to extend.  
-
----
-
-
+👉 for this prototype: **LangChain** keeps it fast, lean, and easy to extend.
