@@ -12,6 +12,10 @@ __pycache__/
 .DS_Store
 .vscode/
 
+# Logs
+logs/
+*.log
+
 # Keep .env.example
 # The file below is intentionally not ignored
 !.env.example
