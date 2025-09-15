@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional
 import requests
 import ipaddress
-
+import os
 
 #Runs GET requests for a given url and return the response.
 def fetch_and_parse_url(url: str) -> str:
@@ -15,7 +15,7 @@ def fetch_and_parse_url(url: str) -> str:
   
 
 #Gathers information of a given IP Address, such as latitude & longitude.
-def getlocation() -> Dict[str, Any]:
+def get_location() -> Dict[str, Any]:
   """Gathers location data based on a given IPv4 address.
 
   """

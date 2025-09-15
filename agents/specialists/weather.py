@@ -2,9 +2,10 @@
 import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.tools import tool
 from langchain_core.runnables import Runnable
-from utils.helper_func import getlocation, local_weather
+from utils.helper_func import get_location, local_weather
 
 def create_weather_agent() -> Runnable:
     """Creates a specialist agent for weather forecasts."""
@@ -27,7 +28,7 @@ def create_weather_agent() -> Runnable:
 @tool
 def get_weather_for_current_location() -> dict:
     """Fetches the weather for the current location based on IP geolocation."""
-    location_data = getlocation()
+    location_data = get_location()
     lat = location_data.get("lat")
     lon = location_data.get("lon")
     if lat is None or lon is None:
@@ -39,9 +40,12 @@ def get_weather_for_current_location() -> dict:
         "forecast": weather_data.get("weather", [{}])[0].get("description", "No data"),
         "temperature_fahrenheit": round((weather_data.get("main", {}).get("temp", 0) - 273.15) * 9/5 + 32, 2)
     }
-"""Sanitizes and logs the output of the weather agent."""
-def _run(x):
-    result = x.get("result", {})
-    if not isinstance(result, dict):
-        raise ValueError("Weather agent returned non-dictionary result.")
-    return result
+# """Sanitizes and logs the output of the weather agent."""
+# def _run(x):
+#     result = x.get("result", {})
+#     if not isinstance(result, dict):
+#         raise ValueError("Weather agent returned non-dictionary result.")
+#     return result
+
+
+# weather_agent = create_weather_agent()
