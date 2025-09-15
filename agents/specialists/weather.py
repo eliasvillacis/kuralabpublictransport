@@ -5,7 +5,12 @@ from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.tools import tool
 from langchain_core.runnables import Runnable
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+
 from utils.helper_func import get_location, local_weather
+
 
 def create_weather_agent() -> Runnable:
     """Creates a specialist agent for weather forecasts."""
@@ -22,7 +27,7 @@ def create_weather_agent() -> Runnable:
         ("human", "{query}")
     ])
     
-    return prompt | llm | JsonOutputParser()
+    return prompt | llm | StrOutputParser()
 
 
 @tool
