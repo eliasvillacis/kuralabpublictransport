@@ -51,6 +51,4 @@ def get_weather_for_current_location() -> dict:
 #     if not isinstance(result, dict):
 #         raise ValueError("Weather agent returned non-dictionary result.")
 #     return result
-
-
 # weather_agent = create_weather_agent()
