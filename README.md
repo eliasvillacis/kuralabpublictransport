@@ -198,10 +198,6 @@ docker-compose down
 - 🚇 **Enhanced Transit**: Real-time arrival predictions
 - ♿ **Accessibility**: Comprehensive mobility support
 
-## 🏗️ Architecture
-
-For detailed technical information about the multi-agent architecture, design decisions, and implementation details, see [ARCHITECTURE.md](./ARCHITECTURE.md).
-
 ---
 
 <p align="center">
