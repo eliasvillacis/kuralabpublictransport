@@ -94,9 +94,10 @@ docker-compose down
 📂 agents/
   ├─ 🎭 supervisor.py     # Main orchestrator & routing
   └─ 📂 specialists/
-     ├─ 🗺️ maps.py       # Location & routing
-     ├─ 🚇 transit.py    # Public transit
-     └─ 🌤️ weather.py    # Weather conditions
+  ├─ 🗺️ maps.py       # Location & routing
+  ├─ 🚦 traffic.py    # Traffic conditions (Google Routes API)
+  ├─ 🚇 transit.py    # Public transit
+  └─ 🌤️ weather.py    # Weather conditions
 📂 utils/
   ├─ 📝 logger.py        # Logging utilities
   └─ 🗺️ google_maps.py   # Maps API integration
@@ -137,6 +138,7 @@ User Request → Supervisor (AI) → Specialists → Live Data → Response
 
 ### Agent Specialists
 - 🗺️ **Maps**: Routing, directions, and location services (Geocoding API, Routes API, Maps Static API, Places API)
+- 🚦 **Traffic**: Real-time traffic conditions and incidents (Google Routes API)
 - 🚇 **Transit**: Public transportation schedules and updates (Transitland API)
 - 🌦️ **Weather**: Conditions that affect travel decisions (Weather API)
 - 📍 **Location**: Device/IP-based geolocation (Geolocation API)
