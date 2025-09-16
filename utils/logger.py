@@ -17,7 +17,7 @@ def get_logger(name: str) -> logging.Logger:
     """
     logger = logging.getLogger(name)
     
-    # Set the desired level for this logger.
+    # Use LOG_LEVEL environment variable with a sensible default
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, log_level, logging.INFO)
     logger.setLevel(level)

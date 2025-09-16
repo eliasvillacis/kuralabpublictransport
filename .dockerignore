@@ -1,0 +1,15 @@
+# .dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+# .env  # Commented out - we need .env in Docker for API keys
+.venv
+venv/
+.git/
+.gitignore
+README.md
+Dockerfile
+.dockerignore
+logs/*.log
