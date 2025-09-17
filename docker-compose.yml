@@ -4,14 +4,13 @@ services:
     build: .
     ports:
       - "8000:8000"
+    # Load all sensitive values from local .env (NOT committed). Only overrides listed here.
+    env_file:
+      - .env
     environment:
-      - GOOGLE_GENAI_API_KEY=${GOOGLE_GENAI_API_KEY}
-      - GOOGLE_CLOUD_API_KEY=${GOOGLE_CLOUD_API_KEY}
-      - TRANSITLAND_API_KEY=${TRANSITLAND_API_KEY}
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
-      - TWILIO_WHATSAPP_NUMBER=${TWILIO_WHATSAPP_NUMBER}
-      - LOG_LEVEL=${LOG_LEVEL}
+      # Safe overrides / optional runtime flags
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TEST_MODE: ${TEST_MODE:-0}
     volumes:
-      - ./logs:/app/logs  # Mount logs directory
+      - ./logs:/app/logs  # Mount logs directory for persistence
     restart: unless-stopped  # Auto-restart if it crashes

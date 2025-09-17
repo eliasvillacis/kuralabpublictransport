@@ -125,10 +125,72 @@ requirements.txt        # Python dependencies
 .env.example            # Example environment variable file
 docker-compose.yml      # Container orchestration for local/prod deployment
 ```
-
 ---
 
+## 🧪 Test Suite Deep Dive
+
+### Goals
+- Fast (seconds) feedback loop
+- Zero dependency on real API keys in CI
+- Deterministic outputs (no LLM paraphrase drift)
+- Validate routing, parsing, and compilation glue—not upstream vendor reliability
+
+### Files
+| File | Purpose |
+|------|---------|
+| `tests/conftest.py` | Session‑scoped supervisor fixture + environment setup (`TEST_MODE=1`, dummy `GOOGLE_GENAI_API_KEY`). |
+| `tests/test_routing.py` | Assertions around query classification, agent selection, and response token presence. |
+
+If more domains are added (e.g., pricing, alerts), prefer adding new focused test modules (`test_transit.py`, etc.) rather than bloating `test_routing.py`.
+
+### `conftest.py` Mechanics
+1. Inserts project root into `sys.path` (ensures direct import of `agents.supervisor`).
+2. Forces a harmless dummy `GOOGLE_GENAI_API_KEY` so code paths that merely check key presence don’t crash.
+3. Sets `TEST_MODE=1` to skip LLM instantiation and external calls.
+4. Exposes a `supervisor_instance` fixture returning the callable supervisor entry function.
+
+### Test Mode Behavior (Runtime)
+When `TEST_MODE=1`:
+- Supervisor sets `llm=None`.
+- Query parsing: regex + keyword extraction for weather (“weather in X and Y”).
+- Single / multi‑location weather responses: deterministic stub strings (`<City> now: 70F clear`).
+- Chit‑chat: fixed friendly fallback if LLM absent.
+- No specialist API call is required for multi‑location stubs (early short‑circuit). Single-location may still invoke lightweight specialist logic if desired, but remains deterministic.
+
+### Assertions Strategy
+Each test aims to assert STRUCTURE + INTENT, not style:
+- Agent presence: `"Weather" in agent_names` or `"Chit_Chat"` chosen.
+- Location tokens present for multi‑weather queries.
+- No brittle string matching on full sentences (keeps refactors easy).
+
+### Adding New Tests
+1. Add or extend a stub path if the new feature would otherwise hit external APIs under `TEST_MODE`.
+2. Write a test asserting minimal contract (e.g., agent routed + key field present in response dict).
+3. Avoid over‑specifying natural language phrasing.
+4. If introducing slow or real network tests, mark them:
+  ```python
+  @pytest.mark.external
+  def test_real_weather_live(): ...
+  ```
+  And exclude them from default CI runs (`pytest -m "not external"`).
+
+### Common Pitfalls Avoided
+- Flaky LLM responses: eliminated by stubs.
+- Network rate limits / quota: avoided in CI.
+- JSON shape drift from external providers: not asserted in core tests (could be covered by optional integration layer later).
+
+### Extension Ideas
+- Add schema validation with Pydantic models for agent outputs, then assert `.model_validate()` in tests.
+- Introduce property-based tests (Hypothesis) for parsing edge cases (“weather in   New   York and    Tokyo”).
+- Snapshot test (optional) for multi‑agent synthesis once style stabilizes.
+
+### Why Not More Tests Yet?
+Deliberately minimal to keep maintenance friction low while core architecture evolves. As APIs stabilize, layer deeper validation iteratively.
+
+---
 
 ## ✅ Summary
 
 Vaya is designed to be modular, extensible, and easy to evolve. Its centralized LLM supervisor, agent fallbacks, and clear separation of concerns make it straightforward to extend, debug, and deploy in local or experimental environments. The file-by-file structure and explicit agent roles also help new contributors onboard quickly and understand how each piece fits together. While the architecture lays a strong foundation, production-grade hardening (security, scaling, monitoring) would be needed before a real deployment
+
+---

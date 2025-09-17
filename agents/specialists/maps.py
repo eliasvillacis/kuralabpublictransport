@@ -3,7 +3,7 @@
 # Uses Google Geocoding API, Places API, Maps Static API, and Geolocation API.
 # For routing with traffic, see the Traffic agent (uses Google Routes API).
 # Now uses direct information from the supervisor without an LLM dependency.
-from langchain.schema.runnable import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda
 import os
 import json
 from typing import Dict, Any, Optional

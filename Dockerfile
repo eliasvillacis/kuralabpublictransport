@@ -19,6 +19,11 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy application source
 COPY . .
 
+# Create non-root user for security
+RUN useradd -m -u 1001 appuser \
+	&& chown -R appuser:appuser /app
+USER appuser
+
 # Default environment configuration (override at runtime)
 ENV API_HOST=0.0.0.0 \
 	API_PORT=8000 \
@@ -27,9 +32,11 @@ ENV API_HOST=0.0.0.0 \
 # Expose FastAPI port
 EXPOSE 8000
 
-# Health check hitting the /health endpoint
+# Health check hitting the /health endpoint (use PORT if provided by platform like Render)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl --fail http://localhost:8000/health || exit 1
+	CMD curl --fail http://localhost:${PORT:-8000}/health || exit 1
 
-# Start application (allows server.py to manage uvicorn invocation / env)
-CMD ["python", "server.py"]
+# Start application with uvicorn directly for better prod behavior
+ENV UVICORN_WORKERS=1
+# Use shell form so that env vars expand at runtime; bind to platform PORT if present (Render sets PORT)
+CMD python -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${UVICORN_WORKERS:-1}
