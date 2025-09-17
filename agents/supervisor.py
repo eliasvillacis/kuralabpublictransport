@@ -12,6 +12,7 @@ from .specialists.weather import create_weather_agent
 from .specialists.traffic import create_traffic_agent
 from .specialists.transit import create_transit_agent
 from .specialists.maps import create_maps_agent
+from .specialists.chitchat import create_chit_chat_specialist
 
 logger = get_logger(__name__)
 
@@ -33,6 +34,7 @@ def create_supervisor() -> Runnable:
         "Traffic": create_traffic_agent,
         "Transit": create_transit_agent,
         "Maps": create_maps_agent,
+        "Chit_Chat": create_chit_chat_specialist,
     }
     # Wrap each agent so it always returns a dict, never a RunnableLambda
     def _wrap_agent(agent):
@@ -67,20 +69,37 @@ def create_supervisor() -> Runnable:
     # --- LLM-based extraction helper ---
     def extract_query_info(query: str, history: str = "") -> dict:
         prompt = ChatPromptTemplate.from_template(
-            "You are an intelligent routing system for a transportation assistant. Your job is to understand what the user wants and determine which specialist agents to call.\n\n"
-            "Available Specialist Agents:\n"
-            "- Weather: Provides current weather conditions, temperature, wind, humidity for any location\n"
-            "- Traffic: Provides real-time traffic conditions, route planning with traffic data, travel times\n"
-            "- Transit: Provides public transportation schedules, delays, route information for buses/trains/subway\n"
-            "- Maps: Provides location lookup, address geocoding, place search, basic directions\n\n"
-            "Based on the user's query, determine which agents are needed and extract relevant information.\n"
-            "Return ONLY a single valid JSON object as your entire output. Do NOT include any explanations, examples, markdown, or code blocks. Do NOT include any text before or after the JSON."
+            "You are a query parser for a transportation assistant. Analyze the user query and determine what they want.\n\n"
+            "User Query: \"{query}\"\n\n"
+            "Query Types to Identify:\n"
+            "1. WEATHER: Any mention of weather, temperature, conditions, rain, snow, forecast, etc.\n"
+            "2. TRANSIT: Public transportation, buses, trains, subways, schedules\n"
+            "3. TRAFFIC: Traffic conditions, road conditions, drive times\n"
+            "4. MAPS: Location lookup, directions, places, addresses\n"
+            "5. CHIT_CHAT: Greetings, how are you, general conversation without specific requests\n\n"
+            "For WEATHER queries (including 'what's the weather like', 'how's the weather', 'is it raining', etc.):\n"
+            "{{\n"
+            "  \"weather_requests\": [\n"
+            "    {{\"location\": \"LOCATION_OR_current_location\", \"time\": \"TIME_OR_now\"}}\n"
+            "  ],\n"
+            "  \"agents\": [\"Weather\"],\n"
+            "  \"query_type\": \"weather\"\n"
+            "}}\n\n"
+            "For CHIT_CHAT (greetings, casual conversation):\n"
+            "{{\n"
+            "  \"query_type\": \"chit_chat\",\n"
+            "  \"agents\": [\"Chit_Chat\"]\n"
+            "}}\n\n"
+            "For other agent types, follow similar patterns.\n\n"
+            "IMPORTANT: 'what's the weather like' = weather request, not chit-chat!\n"
+            "Return ONLY valid JSON. No explanations, no markdown, no code blocks."
         )
         import ast, re
         response = None
         try:
             response = llm.invoke(prompt.format(query=query, history=history))
             content = response.content.strip()
+            
             # Remove code block markers if present
             if content.startswith('```'):
                 content = re.sub(r'^```[a-zA-Z]*', '', content).strip()
@@ -217,30 +236,89 @@ def create_supervisor() -> Runnable:
         specialists into a single unified response.
         """
         try:
-            # Include location context information for better responses
+            # Check if this is a single weather request and enhance accordingly
+            is_single_weather = params.get('single_weather', False)
+            time_ref = params.get('time_reference', 'now')
+            location_ref = params.get('location_reference', '')
+
+            # Compose location context for prompt clarity
             origin_context = f"Origin: {params.get('origin')}" if params.get('origin') else ""
             destination_context = f"Destination: {params.get('destination')}" if params.get('destination') else ""
             location_context = "\n".join(filter(None, [origin_context, destination_context]))
-            
-            prompt_text = f"""You are Vaya, a conversational GPS assistant for urban navigation. Synthesize the results from the specialist agents into a clear, concise response.
 
-Your core purpose: Help people navigate their immediate surroundings primarily via walking and public transportation. Never suggest driving directions or car-related information.
+            # Enhanced prompt for more natural, contextual responses
+            if is_single_weather:
+                # --- Single weather request prompt construction ---
+                # This block builds a conversational, context-aware prompt for the LLM
+                user_location = params.get('user_location', {})
+                user_location_label = user_location.get('label', 'your area') if user_location else 'your area'
+
+                # Determine how to phrase the location in the response
+                if location_ref in ['current_location', 'here', 'near me', 'my location']:
+                    location_style = f"your current area ({user_location_label})"
+                else:
+                    location_style = location_ref
+
+                # Phrase the time reference for natural language
+                if time_ref == 'now':
+                    time_style = "right now"
+                elif 'hour' in time_ref:
+                    time_style = f"{time_ref}"
+                elif time_ref == 'tomorrow':
+                    time_style = "tomorrow"
+                else:
+                    time_style = time_ref
+
+                # Check if the query is about travel/arrival context
+                query_lower = params.get('query', '').lower()
+                has_travel_context = any(word in query_lower for word in ['land', 'arrive', 'get there', 'flight', 'trip', 'travel'])
+
+                if has_travel_context:
+                    context_instruction = "The user is asking about weather in the context of travel/arrival. Acknowledge this context naturally."
+                else:
+                    context_instruction = "This is a straightforward weather request."
+
+                # Prompt template for the LLM
+                prompt_text = f"""You are Vaya, a warm and friendly travel assistant. Provide weather information in a natural, conversational way.
+
+Context: {context_instruction}
+Location: {location_style}
+Time: {time_style}
+Query: "{params.get('query', '')}"
+
+Guidelines:
+- Be conversational and warm, but concise (1-2 sentences)
+- Include the specific temperature, conditions, wind speed, and humidity from the JSON data
+- If it's about travel/landing, acknowledge that context
+- Don't use repetitive openings like "Hello!" every time
+- Make it feel like helpful advice from a knowledgeable friend
+- Vary your phrasing to sound natural
+
+Weather Data:
+{params.get('results', 'No results available')}
+
+Provide a natural, friendly response:"""
+            else:
+                # Use the original prompt for non-weather or multi-agent responses
+                # This block is for synthesizing results from multiple agents (e.g., transit, maps, weather)
+                prompt_text = f"""You are Vaya, a conversational GPS assistant for public transport and walking. Synthesize the results from the specialist agents into a clear, concise, and friendly response.
+
+Core purpose:
+- Help people navigate cities and regions using public transportation and walking.
+- Never suggest driving or car-related information.
+- Provide weather, transit, and location information for any place the user requests, whether local or distant, as long as the user specifies it.
+- If the user asks about multiple places or times, answer each clearly and helpfully.
 
 Response Guidelines:
 1. ALWAYS include ALL information from ALL agents that provided useful data.
-2. If user asks for both weather AND location, provide BOTH pieces of information.
-3. For weather, you MUST explicitly state the temperature (in Fahrenheit), main conditions, wind speed, and humidity using the exact values from the JSON results. Do not summarize, generalize, or omit these details. If there are any hazards or warnings (e.g., rain, snow, storms, high winds, extreme heat/cold), mention them directly as found in the JSON.
+2. If the user asks for both weather AND location, provide BOTH pieces of information.
+3. For weather, explicitly state the temperature (in Fahrenheit), main conditions, wind speed, and humidity using the exact values from the JSON results. Mention any hazards or warnings (e.g., rain, snow, storms, high winds, extreme heat/cold) directly as found in the JSON.
 4. Do not use phrases like "looks pleasant" or "nice weather"—always give the actual numbers and conditions.
 5. If you have general area information (like "Queens, NY"), use it confidently.
-6. Only mention limitations if you truly cannot provide the requested information.
-7. When explaining limitations about distant locations, do NOT provide unsolicited local information.
-8. Keep responses focused - only provide what was specifically requested or directly relevant.
-
-Key constraints to communicate when necessary:
-1. You focus ONLY on the user's current location and immediate surroundings.
-2. For information about distant locations, explain you're designed for local navigation and can't provide information about distant places.
-3. For weather beyond 24 hours or historical data, briefly suggest a specialized app.
-4. Always prioritize walking and public transit options over driving.
+6. Only mention limitations if you truly cannot provide the requested information (e.g., weather more than 10 days in advance, or unavailable data).
+7. If the user asks about a distant location, answer if you have the data—do not restrict to local only.
+8. Keep responses focused—only provide what was specifically requested or directly relevant.
+9. Always prioritize walking and public transit options over driving.
 
 When presenting weather, always include:
 - The temperature (in Fahrenheit)
@@ -250,7 +328,7 @@ When presenting weather, always include:
 
 Do not summarize or omit weather details—always state the temperature, conditions, wind speed, and humidity as numbers/values from the JSON.
 
-Keep responses brief and to the point. Use 1-3 sentences. When users ask about distant places, ONLY explain your limitations and suggest alternatives - do not provide unrelated local information. Your final response should be in plain text, not JSON.
+Keep responses brief, warm, and professional. Use 1-3 sentences per item. If you cannot answer a part of the user's question, gently explain why and suggest an alternative if possible. Your final response should be in plain text, not JSON.
 
 Conversation History:
 {params.get('history', 'No previous conversation.')}
@@ -261,13 +339,103 @@ User's Latest Query: {params.get('query', '')}
 
 Specialist JSON Results:
 {params.get('results', 'No results available')}"""
+            
             response = llm.invoke(prompt_text)
             return response.content if hasattr(response, 'content') else str(response)
         except Exception as e:
             logger.error(f"Compilation failed: {e}")
             return f"I'm sorry, I encountered an error processing your request: {str(e)}"
 
+    def compile_multi_weather_results(params):
+        """
+        Compile multiple weather requests into a single, natural, flowing response.
+
+        Handles scenarios like "weather near me and in Miami" or "weather now and in 2 hours" by
+        generating a conversational summary that covers all requested locations/times.
+        """
+        try:
+            weather_collection = params.get('weather_collection', [])
+            if not weather_collection:
+                return "I couldn't get weather information for your request."
+            
+            user_location = params.get('user_location', {})
+            user_location_label = user_location.get('label', 'your area') if user_location else 'your area'
+            
+            # Analyze the request pattern to choose the best response style
+            locations = [item.get('location', '') for item in weather_collection]
+            times = [item.get('time', 'now') for item in weather_collection]
+            
+            # Determine if this is multi-location, multi-time, or both
+            # This helps the LLM structure the response naturally
+            unique_locations = set(loc for loc in locations if loc not in ['current_location', 'here', 'near me', 'my location'])
+            has_current_location = any(loc in ['current_location', 'here', 'near me', 'my location'] for loc in locations)
+            unique_times = set(times)
+            
+            is_multi_location = len(unique_locations) > 0 and has_current_location
+            is_multi_time = len(unique_times) > 1
+            
+            # Build context for the LLM prompt
+            weather_details = []
+            for item in weather_collection:
+                location = item.get('location', 'unknown')
+                time_ref = item.get('time', 'now')
+                data = item.get('data', {})
+                
+                if data.get('error'):
+                    continue
+                    
+                # Format location label
+                if location in ['current_location', 'here', 'near me', 'my location']:
+                    location_label = user_location_label
+                else:
+                    location_label = location
+                    
+                weather_details.append({
+                    'location': location_label,
+                    'time': time_ref,
+                    'data': data
+                })
+            
+            # Create natural language prompt based on the pattern
+            if is_multi_location and is_multi_time:
+                style_instruction = "You're providing weather for multiple locations at different times. Structure your response to flow naturally, mentioning each location and time clearly. Use transitions like 'Right now here in...' and 'When you're in...' or 'Later in...'"
+            elif is_multi_location:
+                style_instruction = "You're comparing weather in different places. Use natural transitions like 'Here in...' and 'Over in...' or 'In Miami, it's...' Make it feel like a friendly travel update."
+            elif is_multi_time:
+                style_instruction = "You're giving a time-based weather forecast for the same area. Create a flowing timeline like 'Right now...' and 'In an hour...' or 'When you land...' Connect the information naturally."
+            else:
+                style_instruction = "Provide a single, friendly weather update."
+            
+            prompt_text = f"""You are Vaya, a warm and conversational travel assistant. The user asked about weather, and you need to provide a natural, flowing response that doesn't sound robotic or repetitive.
+
+{style_instruction}
+
+Important guidelines:
+- Don't start each sentence with "Hello!" or "Hi there!" - vary your openings
+- Use natural transitions between different locations/times
+- Include all the specific numbers (temperature, wind speed, humidity) from the data
+- Make it sound like a friendly, knowledgeable local giving travel advice
+- Be concise but warm - aim for 2-4 sentences total
+- If it's about travel (like "when I land"), acknowledge that context
+
+User's query: "{params.get('query', '')}"
+
+Weather data to include:
+{json.dumps(weather_details, indent=2)}
+
+Provide a single, natural response that includes all the weather information in a conversational way:"""
+
+            response = llm.invoke(prompt_text)
+            return response.content if hasattr(response, 'content') else str(response)
+            
+        except Exception as e:
+            logger.error(f"Multi-weather compilation failed: {e}")
+            return "I'm having trouble putting together that weather information right now."
+
     def _sanitize_and_log(x):
+        """
+        Clean up and deduplicate agent names, then log the routing decision for debugging.
+        """
         picks = x.get("agent_names", [])
         picks = [p.strip() for p in picks if p and p.strip()]
         seen = set()
@@ -278,6 +446,9 @@ Specialist JSON Results:
         return x
 
     def _invoke_selected(x):
+        """
+        Invoke the selected specialist agents in parallel and unwrap the result if needed.
+        """
         selected = x["agent_names"]
         if not selected:
             return {"note": "No specialists selected. Providing a general response."}
@@ -293,6 +464,8 @@ Specialist JSON Results:
 
     def _extract_last_location(agent_results: dict) -> dict | None:
         """
+        Extract the most recent location from agent results.
+
         Prefer Maps location if present; otherwise fall back to Weather metadata.
         Returns a dict like: {"lat": ..., "lon": ..., "label": ..., "accuracy": ...} or None.
         """
@@ -338,151 +511,292 @@ Specialist JSON Results:
     def process_query(x):
         """
         Main supervisor logic for the centralized LLM architecture.
-        
+
         Process flow:
         1. LLM-based NLU: Extract key information directly from the query
         2. Routing: Determine which specialist agents to call
         3. Information passing: Pass structured data to selected specialists
         4. Specialist processing: Specialists process data without their own LLMs
         5. LLM-based NLG: Synthesize specialist results into a coherent response
-        
+
         This architecture centralizes LLM use in the supervisor, making specialists
-        more efficient as pure API processors.
+        more efficient as pure API processors. This function is the main entry point for
+        handling user queries and orchestrating agent collaboration.
         """
         user_input = x.get("input", "")
         history = x.get("history", "No previous conversation.")
+        # Log the incoming query and history length for debugging
         logger.debug(f"[PROCESS_QUERY] input='{(user_input or '')[:120]}', history_len={len(history) if isinstance(history, list) else 'na'}")
 
-        # Step 1: Extract info and route to get agent names (empty list means chit-chat)
-        routing_context = {
-            "query": user_input, 
-            "history": history,
-            # Pass through the location context
-            "last_location": x.get("last_location")
-        }
-        agent_names = route_query(routing_context)
+        # Step 1: Extract all weather requests from the user query
+        query_info = extract_query_info(user_input, str(history))
+        # Log the extracted query info for traceability
+        logger.debug(f"[QUERY INFO] {json.dumps(query_info)}")
 
-        if not agent_names:
-            # Check if this is a location setting request
-            if routing_context.get("set_location"):
-                location_to_set = routing_context.get("set_location")
+        all_results = []  # Collects all agent responses
+        all_agent_names = set()  # Tracks which agents were used
+        last_location = None  # Tracks the most recent location for context
+
+        # Handle weather requests (can be multiple for one query)
+        weather_requests = []
+        # Extract all weather requests from the query info
+        if "weather_requests" in query_info and isinstance(query_info["weather_requests"], list):
+            weather_requests = query_info["weather_requests"]
+        elif "Weather" in query_info.get("agents", []):
+            # Fallback: if no weather_requests but Weather agent is needed, create one request
+            weather_requests = [{"location": query_info.get("destination") or query_info.get("origin") or "current_location", "time": "now"}]
+
+        if weather_requests:
+            # --- Handle weather requests (can be multiple for one query) ---
+            for req in weather_requests:
+                location = req.get("location", "current_location")
+                time_ref = req.get("time", "now")
+                # Prepare context for weather agent
+                # This context is passed to the Weather specialist
+                weather_context = {
+                    "input": user_input,
+                    "history": history,
+                    "query": user_input,
+                    "agent_names": ["Weather"],
+                    **{k: v for k, v in x.items() if k not in ["input", "history"]},
+                }
+                # Add location context based on the request
+                if location == "current_location" or location in ["here", "near me", "my location"]:
+                    # Use last_location for current location requests
+                    pass  # weather agent will use last_location by default
+                else:
+                    # Use the specified location
+                    weather_context["destination"] = location
+                # Add time reference if not 'now'
+                if time_ref != "now":
+                    weather_context["time_reference"] = time_ref
+
+                logger.debug(f"[WEATHER REQUEST] location={location}, time={time_ref}")
+                # Call weather agent and get the result
+                try:
+                    weather_agent = agent_map["Weather"]
+                    weather_result = weather_agent(weather_context)
+                    # Extract location metadata for context
+                    if isinstance(weather_result, dict):
+                        last_location = _extract_last_location({"Weather": weather_result}) or last_location
+                    # Compile this weather result into a user-friendly response
+                    compiler_params = {
+                        "query": f"weather for {location}" + (f" {time_ref}" if time_ref != "now" else ""),
+                        "history": history,
+                        "results": {"Weather": weather_result}
+                    }
+                    final_response = compile_results(compiler_params)
+                    all_results.append({
+                        "response": final_response,
+                        "agent_names": ["Weather"],
+                        "metadata": {"weather_location": last_location} if last_location else {}
+                    })
+                    all_agent_names.add("Weather")
+                except Exception as e:
+                    logger.error(f"Error calling weather agent for {location}: {e}")
+                    all_results.append({
+                        "response": f"Sorry, I couldn't get weather information for {location} right now.",
+                        "agent_names": [],
+                        "metadata": {}
+                    })
+
+        # Handle non-weather queries (chit-chat, location setting, etc.)
+        # This block handles fallback and non-weather scenarios
+        if not weather_requests:
+            # Check if this is a chit-chat request (general conversation)
+            if query_info.get("query_type") == "chit_chat" or "Chit_Chat" in query_info.get("agents", []):
+                logger.debug(f"[SUPERVISOR] Handling chit-chat request")
+                try:
+                    chit_chat_agent = agent_map["Chit_Chat"]
+                    chat_result = chit_chat_agent(x)
+                    return {
+                        "response": chat_result.get("response", "Hello! How can I help you with transportation today?"),
+                        "agent_names": ["Chit_Chat"],
+                        "metadata": chat_result
+                    }
+                except Exception as e:
+                    logger.error(f"Error calling chit-chat agent: {e}")
+                    return {
+                        "response": "Hello! I'm here to help you with weather, public transit, traffic conditions, and directions. What would you like to know?",
+                        "agent_names": ["Chit_Chat"],
+                        "metadata": {}
+                    }
+            # Check if this is a location setting request (user wants to set their location)
+            elif query_info.get("intent") == "set_location" and query_info.get("user_location"):
+                location_to_set = query_info.get("user_location")
                 logger.debug(f"[SUPERVISOR] Handling location setting: '{location_to_set}'")
-                
                 try:
                     from utils.google_maps import geocode_place
                     new_location = geocode_place(location_to_set)
                     if new_location:
-                        # Return a response that will trigger location update in main.py
                         return {
-                            "response": f"Got it! I've set your location to {new_location.get('label', location_to_set)}. What can I help you with?",
+                            "response": f"I've set your location to {new_location.get('label', location_to_set)}. What else can I help you with?",
                             "agent_names": [],
                             "metadata": {"new_user_location": new_location}
                         }
                     else:
                         return {
-                            "response": f"I couldn't find that location. Please try being more specific with the address.",
+                            "response": f"I couldn't find that location. Could you be a bit more specific, lovely?",
                             "agent_names": [],
                             "metadata": {}
                         }
                 except Exception as e:
                     logger.error(f"Error setting location: {e}")
                     return {
-                        "response": "Sorry, I had trouble updating your location. Please try again.",
+                        "response": "Sorry, I had a little trouble updating your location. Would you mind trying again?",
                         "agent_names": [],
                         "metadata": {}
                     }
-            
-            # Chit-chat: respond directly, skip specialists
-            logger.debug(f"[SUPERVISOR] Responding to chit-chat directly: '{(user_input or '')[:120]}'")
-            
-            # Get location context for chat
-            location_context = ""
-            last_location = x.get("last_location")
-            if last_location:
-                location_context = f"\n\nCurrent context: The user is in {last_location}."
-            
-            # For chit-chat, let the LLM handle it directly
-            chat_prompt = f"""You are Vaya, a conversational GPS assistant for urban navigation with a friendly, upbeat personality. 
+            # Fallback: treat as general query - might need other agents
+            else:
+                logger.debug(f"[SUPERVISOR] Unrecognized query type, treating as chit-chat fallback")
+                try:
+                    chit_chat_agent = agent_map["Chit_Chat"]
+                    chat_result = chit_chat_agent(x)
+                    return {
+                        "response": chat_result.get("response", "I'm not sure how to help with that. Could you ask about weather, transit, traffic, or directions?"),
+                        "agent_names": ["Chit_Chat"],
+                        "metadata": chat_result
+                    }
+                except Exception as e:
+                    logger.error(f"Error in fallback chit-chat: {e}")
+                    return {
+                        "response": "I'm here to help with weather, public transit, traffic, and directions. What can I assist you with?",
+                        "agent_names": [],
+                        "metadata": {}
+                    }
 
-Your core purpose and traits:
-- Help navigate the user's immediate surroundings with enthusiasm
-- Focus on walking and public transportation only
-- Never suggest driving or car-related information
-- Direct and concise communication with a touch of warmth
-- Share occasional fun facts about neighborhoods or transit systems
-- Express enthusiasm for sustainable transportation options
-- Respond in complete but brief sentences (1-3 sentences)
-- When asked about distant locations, explain your focus is on local navigation
-- Remember you are designed for "here and now" navigation assistance
-- Be confident and helpful with the location information you have
-- Avoid saying "I can't" or expressing limitations unless absolutely necessary
+        # For multi-weather requests, compile all results intelligently
+        # This block handles cases where the user asks for weather in multiple places/times
+        if len(weather_requests) > 1:
+            # Collect all weather data for intelligent compilation
+            weather_data_collection = []
+            for req in weather_requests:
+                location = req.get("location", "current_location")
+                time_ref = req.get("time", "now")
+                # Prepare context for weather agent
+                weather_context = {
+                    "input": user_input,
+                    "history": history,
+                    "query": user_input,
+                    "agent_names": ["Weather"],
+                    **{k: v for k, v in x.items() if k not in ["input", "history"]},
+                }
+                # Add location context based on the request
+                if location == "current_location" or location in ["here", "near me", "my location"]:
+                    # Use last_location for current location requests
+                    pass  # weather agent will use last_location by default
+                else:
+                    # Use the specified location
+                    weather_context["destination"] = location
+                # Add time reference if not 'now'
+                if time_ref != "now":
+                    weather_context["time_reference"] = time_ref
 
-Limitations to explain when needed:
-- Focus on current or near-future travel needs
-- For weather beyond 24 hours, recommend a weather app
-- Specialize in real-time transportation questions
-- Best with walking directions and public transit options{location_context}
-
-Respond conversationally to this casual question: {user_input}"""
-            try:
-                response = llm.invoke(chat_prompt)
-                chat_response = response.content if hasattr(response, 'content') else str(response)
-            except Exception as e:
-                chat_response = "How can I help you with public transportation today?"
-                
+                logger.debug(f"[WEATHER REQUEST] location={location}, time={time_ref}")
+                # Call weather agent and collect structured data
+                try:
+                    weather_agent = agent_map["Weather"]
+                    weather_result = weather_agent(weather_context)
+                    # Extract location metadata for context
+                    if isinstance(weather_result, dict):
+                        last_location = _extract_last_location({"Weather": weather_result}) or last_location
+                    weather_data_collection.append({
+                        "location": location,
+                        "time": time_ref,
+                        "data": weather_result,
+                        "user_location": last_location
+                    })
+                    all_agent_names.add("Weather")
+                except Exception as e:
+                    logger.error(f"Error calling weather agent for {location}: {e}")
+                    weather_data_collection.append({
+                        "location": location,
+                        "time": time_ref,
+                        "data": {"error": str(e)},
+                        "user_location": None
+                    })
+            # Compile all weather data into a single, natural response
+            multi_weather_response = compile_multi_weather_results({
+                "query": user_input,
+                "history": history,
+                "weather_collection": weather_data_collection,
+                "user_location": x.get("last_location")
+            })
             return {
-                "response": chat_response,
-                "agent_names": [],
-                "metadata": {}
+                "response": multi_weather_response,
+                "agent_names": list(all_agent_names),
+                "metadata": {"weather_location": last_location} if last_location else {}
             }
+        # Single weather request - use the existing individual compilation but with better styling
+        # This block handles the case where only one weather request is present
+        elif len(weather_requests) == 1:
+            req = weather_requests[0]
+            location = req.get("location", "current_location")
+            time_ref = req.get("time", "now")
+            # Prepare context for weather agent
+            weather_context = {
+                "input": user_input,
+                "history": history,
+                "query": user_input,
+                "agent_names": ["Weather"],
+                **{k: v for k, v in x.items() if k not in ["input", "history"]},
+            }
+            # Add location context based on the request
+            if location == "current_location" or location in ["here", "near me", "my location"]:
+                # Use last_location for current location requests
+                pass  # weather agent will use last_location by default
+            else:
+                # Use the specified location
+                weather_context["destination"] = location
+            # Add time reference if not 'now'
+            if time_ref != "now":
+                weather_context["time_reference"] = time_ref
 
-        # Step 2: Prepare context for agents
-        # Include extracted origin/destination if available
-        x_with_agents = {
-            "input": user_input,
-            "history": history,
-            "query": user_input,  # keep for agents that read 'query'
-            "agent_names": agent_names,
-            **{k: v for k, v in x.items() if k not in ["input", "history"]},
-            # Add any extracted location info from routing
-            **({"origin": routing_context.get("origin")} if "origin" in routing_context else {}),
-            **({"destination": routing_context.get("destination")} if "destination" in routing_context else {})
+            logger.debug(f"[WEATHER REQUEST] location={location}, time={time_ref}")
+            # Call weather agent and get the result
+            try:
+                weather_agent = agent_map["Weather"]
+                weather_result = weather_agent(weather_context)
+                # Extract location metadata for context
+                if isinstance(weather_result, dict):
+                    last_location = _extract_last_location({"Weather": weather_result}) or last_location
+                # Compile this weather result with enhanced styling
+                compiler_params = {
+                    "query": user_input,
+                    "history": history,
+                    "results": {"Weather": weather_result},
+                    "user_location": x.get("last_location"),
+                    "single_weather": True,
+                    "time_reference": time_ref,
+                    "location_reference": location
+                }
+                final_response = compile_results(compiler_params)
+                return {
+                    "response": final_response,
+                    "agent_names": ["Weather"],
+                    "metadata": {"weather_location": last_location} if last_location else {}
+                }
+            except Exception as e:
+                logger.error(f"Error calling weather agent for {location}: {e}")
+                return {
+                    "response": f"Sorry, I couldn't get weather information for {location} right now.",
+                    "agent_names": [],
+                    "metadata": {}
+                }
+        # Fallback (shouldn't happen with the new logic)
+        return {
+            "response": "I'm not sure how to help with that request.",
+            "agent_names": [],
+            "metadata": {}
         }
-        x_sanitized = _sanitize_and_log(x_with_agents)
-
-        # Step 3: Invoke selected agents
-        agent_results = _invoke_selected(x_sanitized)
-
-        # Step 4: Extract last_location from Maps or Weather
-        last_location = None
-        if isinstance(agent_results, dict):
-            last_location = _extract_last_location(agent_results)
-
-        # Step 5: Compile results
-        compiler_params = {
-            "query": user_input,
-            "history": history,
-            "results": agent_results,
-            # Add origin/destination context for more natural responses
-            "origin": x_with_agents.get("origin"),
-            "destination": x_with_agents.get("destination")
-        }
-        final_response = compile_results(compiler_params)
-
-        result = {
-            "response": final_response,
-            "agent_names": agent_names,
-            "metadata": {"weather_location": last_location} if last_location else {}
-        }
-        # Final unwrapping: if result is a Runnable, unwrap
-        if hasattr(result, "invoke") and callable(result.invoke):
-            return result.invoke(x)
-        if callable(result) and not isinstance(result, dict):
-            return result(x)
-        return result
 
     # Instead of returning a RunnableLambda, return a plain function or dict as required by main.py
     def supervisor_entry(x):
+        """
+        Entry point for the supervisor agent.
+        Handles unwrapping of results and ensures a plain dict or string is returned.
+        """
         result = process_query(x)
         # Final unwrapping: if result is a Runnable, unwrap
         if hasattr(result, "invoke") and callable(result.invoke):
