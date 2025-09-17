@@ -1,12 +1,13 @@
 # agents/specialists/weather.py
-# Specialist for weather hazards and travel-impacting conditions.
-# Uses Google Weather API for real-time and forecast weather data.
-# Uses direct information from the supervisor without an LLM dependency.
+# Specialist agent for weather hazards and travel-impacting conditions.
+# Fetches real-time and forecast weather data using Google Weather API.
+# This agent does not use an LLM; it processes structured data from the supervisor.
 
 import os
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 
 from langchain.schema.runnable import Runnable, RunnableLambda
 
@@ -22,8 +23,17 @@ logger = get_logger(__name__)
 
 def google_weather_now(lat: float, lon: float, units: str = "IMPERIAL") -> Dict[str, Any]:
     """
-    Get current weather conditions from Google Maps Weather API.
-    Returns the inner `currentConditions` object when present.
+    Fetch current weather conditions from Google Maps Weather API.
+    Returns the `currentConditions` object if present, otherwise the full response.
+    Args:
+        lat: Latitude of the location.
+        lon: Longitude of the location.
+        units: Unit system, e.g., 'IMPERIAL' or 'METRIC'.
+    Returns:
+        Dictionary of current weather conditions.
+    Raises:
+        ValueError: If the API key is missing.
+        requests.HTTPError: If the API call fails.
     """
     api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
     if not api_key:
@@ -52,8 +62,18 @@ def google_weather_now(lat: float, lon: float, units: str = "IMPERIAL") -> Dict[
 
 def google_weather_hourly(lat: float, lon: float, hours: int = 24, units: str = "IMPERIAL") -> List[Dict[str, Any]]:
     """
-    Get hourly weather forecast from Google Maps Weather API.
-    Returns list of normalized hourly dicts.
+    Fetch hourly weather forecast from Google Maps Weather API.
+    Returns a list of normalized hourly forecast dictionaries.
+    Args:
+        lat: Latitude of the location.
+        lon: Longitude of the location.
+        hours: Number of forecast hours to retrieve (max 240).
+        units: Unit system, e.g., 'IMPERIAL' or 'METRIC'.
+    Returns:
+        List of hourly forecast dictionaries.
+    Raises:
+        ValueError: If the API key is missing.
+        requests.HTTPError: If the API call fails.
     """
     api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
     if not api_key:
@@ -126,7 +146,12 @@ def google_weather_hourly(lat: float, lon: float, hours: int = 24, units: str = 
 
 def format_hourly_forecast(forecasts: List[Dict[str, Any]], hours: Optional[int] = None) -> str:
     """
-    Format hourly forecast data into a human-readable string.
+    Format a list of hourly forecast data into a human-readable string.
+    Args:
+        forecasts: List of hourly forecast dictionaries.
+        hours: Optional number of hours to include in the output.
+    Returns:
+        String summary of the hourly forecast.
     """
     if not forecasts:
         return "No forecast data available."
@@ -157,7 +182,13 @@ def format_hourly_forecast(forecasts: List[Dict[str, Any]], hours: Optional[int]
 
 def _normalize_weather(payload: Dict[str, Any], label: Optional[str]) -> Dict[str, Any]:
     """
-    Normalize the current-conditions payload (handles top-level or nested `currentConditions`).
+    Normalize the current-conditions payload from the Google Weather API.
+    Handles both top-level and nested `currentConditions` keys.
+    Args:
+        payload: Raw weather API response or currentConditions dict.
+        label: Human-readable location label.
+    Returns:
+        Dictionary with normalized weather fields for downstream use.
     """
     if not payload:
         return {
@@ -238,9 +269,13 @@ def _normalize_weather(payload: Dict[str, Any], label: Optional[str]) -> Dict[st
 # ----------------------------
 
 def create_weather_agent() -> Runnable:
+    """
+    Factory for the weather specialist agent.
+    Returns a Runnable that processes structured weather requests from the supervisor.
+    The agent does not use an LLM; it only calls APIs and normalizes results.
+    """
     # No need for LLM initialization since we'll use the supervisor's extracted data
-    
-    # Time reference mapping for forecast types
+    # Map time references (e.g., 'now', 'tomorrow') to forecast types
     TIME_REFERENCE_MAPPING = {
         "now": {"type": "current"},
         "current": {"type": "current"},
@@ -260,23 +295,15 @@ def create_weather_agent() -> Runnable:
     # No need for hybrid parsing anymore
     def extract_weather_info(x: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Extract weather information from the supervisor's data.
-        
+        Extract weather intent information from supervisor-provided data.
         This function is part of the LLM-free specialist design pattern:
-        - It processes structured data already extracted by the supervisor's LLM
+        - Processes structured data already extracted by the supervisor's LLM
         - No LLM calls are made in this specialist
         - Data is directly prepared for API calls without language understanding
-        
-        This replaces the previous hybrid parsing approach (rule-based + LLM fallback)
-        with direct use of supervisor-extracted information, making the specialist
-        more efficient and removing duplicate LLM processing.
-        
         Args:
-            x: Dictionary containing supervisor-extracted information including
-               location_context, origin, destination, time_reference, etc.
-               
+            x: Dictionary containing supervisor-extracted information (location, time, etc.)
         Returns:
-            Dictionary with structured weather intent information
+            Dictionary with structured weather intent information for downstream use.
         """
         intent = {}
         
@@ -315,20 +342,25 @@ def create_weather_agent() -> Runnable:
 
 
     def _exec(x: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Main execution function for the weather agent.
+        Resolves location, determines forecast type, fetches weather data, and normalizes output.
+        Args:
+            x: Dictionary containing supervisor-extracted information and session context.
+        Returns:
+            Dictionary with normalized weather data and session metadata.
+        """
         logger.debug(f"Weather agent received last_location: {x.get('last_location')}")
         query = x.get("query", x.get("input", "")) or ""
-        
+
         # Get the intent directly from the supervisor's extracted information
-        # This replaces the hybrid parser with direct use of LLM-extracted data
         intent = extract_weather_info(x)
-        
+
         # If we didn't get enough information, use basic defaults
         if not intent.get("type"):
             intent["type"] = "current"  # Default to current weather
-            
         if not intent.get("time_reference"):
             intent["time_reference"] = "now"
-            
         logger.debug(f"LLM-derived intent: {intent}")
 
         label: Optional[str] = None
@@ -343,7 +375,7 @@ def create_weather_agent() -> Runnable:
         # 3) last_location from session context
         # 4) client IP geolocation (fallback)
         # 5) hard default (never should happen with new default_location)
-        
+
         # 1) explicit coords in intent
         if "lat" in intent and "lon" in intent:
             lat, lon = float(intent["lat"]), float(intent["lon"])
@@ -352,15 +384,16 @@ def create_weather_agent() -> Runnable:
             source = "explicit_intent"
             logger.debug(f"Using explicit coordinates from intent: ({lat}, {lon})")
 
-        # 2) place string -> geocode (but never for generic phrases or time references)
+        # 2) place string -> geocode (accept city/neighborhood, not just street address)
         elif "place" in intent and intent["place"] and intent["place"].strip().lower() not in {
             "temperature", "weather", "forecast", "here", "current location", "my location", "location",
             "now", "today", "tomorrow", "morning", "afternoon", "evening", "night", "weekend",
             "and morning", "and afternoon", "and evening", "and night", "and tomorrow",
             "this morning", "this afternoon", "this evening", "this weekend", "next week"
         }:
+            # Accept city/neighborhood-level geocoding, do not require street address
             geo = geocode_place(intent["place"])
-            if geo:
+            if geo and geo.get("lat") and geo.get("lon"):
                 lat, lon = geo["lat"], geo["lon"]
                 label = geo.get("label") or intent["place"]
                 accuracy = geo.get("accuracy")
@@ -399,6 +432,32 @@ def create_weather_agent() -> Runnable:
             source = "hard_default"
             logger.warning(f"Using hard-coded default location: {label}")
 
+        # Detect explicit time expressions like '1am', '1 am', '1:30am', '01:30 AM'
+        explicit_time_target: Optional[datetime] = None
+        time_match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s?(a\.?m\.?|p\.?m\.?)\b", query.lower())
+        if time_match:
+            hour_str, minute_str, ampm = time_match.groups()
+            hour = int(hour_str)
+            minute = int(minute_str) if minute_str else 0
+            ampm_norm = ampm.replace('.', '')
+            if ampm_norm.startswith('p') and hour != 12:
+                hour += 12
+            if ampm_norm.startswith('a') and hour == 12:
+                hour = 0
+            now_utc = datetime.utcnow()
+            # Assume user's local time roughly equals timezone of target location (no tz lookup yet)
+            candidate = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            # If that time already passed (>= 2 hours earlier), assume next day
+            if candidate < now_utc - timedelta(hours=1):
+                candidate += timedelta(days=1)
+            explicit_time_target = candidate
+            # Force hourly forecast retrieval window if not already set
+            if intent.get("type") != "hourly":
+                intent["type"] = "hourly"
+                # Use enough hours to reach the requested time (max 24 for now)
+                intent["hours"] = max(min(24, int((candidate - now_utc).total_seconds() // 3600) + 2), 6)
+            logger.debug(f"Explicit time detected -> target hour UTC: {explicit_time_target.isoformat()} (hours window={intent.get('hours')})")
+
         # current conditions
         try:
             cur = google_weather_now(lat, lon)
@@ -421,13 +480,47 @@ def create_weather_agent() -> Runnable:
                 hours = min(int(intent.get("hours", 24)), 240)
                 forecasts = google_weather_hourly(lat, lon, hours=hours)
                 if forecasts:
-                    result["forecast"] = format_hourly_forecast(forecasts, hours)
                     forecast_type = "hourly"
+                    # If explicit time requested, pick closest hour
+                    if explicit_time_target:
+                        closest = None
+                        closest_delta = None
+                        for fc in forecasts:
+                            try:
+                                fc_time = datetime.fromisoformat(fc["time"])
+                                delta = abs((fc_time - explicit_time_target))
+                                if (closest_delta is None) or (delta < closest_delta):
+                                    closest = fc
+                                    closest_delta = delta
+                            except Exception:
+                                continue
+                        if closest:
+                            temp = closest['temperature']['value']
+                            unit_letter = closest['temperature']['unit'][0]
+                            feels_val = closest['feels_like']['value']
+                            feels_unit = closest['feels_like']['unit'][0]
+                            feels_part = '' if feels_val == temp else f" (feels like {feels_val}°{feels_unit})"
+                            precip_part = ''
+                            if closest['precipitation']['probability'] > 0:
+                                precip_part = f", {closest['precipitation']['probability']}% chance of {closest['precipitation']['type']}"
+                            wind_part = ''
+                            if closest['wind']['speed']['value'] > 5:
+                                wind_part = f", {closest['wind']['direction']} wind {closest['wind']['speed']['value']} {closest['wind']['speed']['unit']}"
+                            explicit_line = (
+                                f"Around {explicit_time_target.strftime('%I:%M %p').lstrip('0')}: "
+                                f"{closest['conditions']}, {temp}°{unit_letter}{feels_part}{precip_part}{wind_part}"
+                            )
+                            result['explicit_time_forecast'] = explicit_line
+                            result['forecast_disclaimer'] = "Time-based forecast is approximate and may shift; conditions can vary overnight."
+                        # Also keep a compact standard forecast list (first N lines)
+                        result["forecast"] = format_hourly_forecast(forecasts, hours)
+                    else:
+                        result["forecast"] = format_hourly_forecast(forecasts, hours)
         except Exception as e:
             logger.error(f"Error getting {forecast_type or 'hourly'} forecast: {e}")
             result[f"{forecast_type or 'hourly'}_forecast"] = f"{(forecast_type or 'Hourly').capitalize()} forecast unavailable"
 
-        # attach session metadata
+        # Attach session metadata for downstream use
         result_metadata = {
             "lat": lat, 
             "lon": lon, 
