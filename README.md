@@ -117,5 +117,3 @@ Run `python server.py` and use:
 ## 📖 System & Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full breakdown of agent roles, request flow, and integration patterns.
-
----
