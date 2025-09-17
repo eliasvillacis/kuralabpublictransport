@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import re
 
-from langchain.schema.runnable import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda
 
 from utils.google_maps import geocode_place, get_location_from_source
 from utils.logger import get_logger
@@ -35,6 +35,19 @@ def google_weather_now(lat: float, lon: float, units: str = "IMPERIAL") -> Dict[
         ValueError: If the API key is missing.
         requests.HTTPError: If the API call fails.
     """
+    # Offline deterministic stub for TEST_MODE
+    if os.getenv("TEST_MODE") == "1":
+        return {
+            "weatherCondition": {"description": {"text": "Clear"}, "iconBaseUri": ""},
+            "temperature": {"degrees": 72, "unit": "FAHRENHEIT"},
+            "feelsLikeTemperature": {"degrees": 72, "unit": "FAHRENHEIT"},
+            "relativeHumidity": 40,
+            "wind": {
+                "speed": {"value": 5, "unit": "MILES_PER_HOUR"},
+                "direction": {"cardinal": "N"}
+            }
+        }
+
     api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
     if not api_key:
         raise ValueError("Missing GOOGLE_CLOUD_API_KEY")
@@ -75,6 +88,26 @@ def google_weather_hourly(lat: float, lon: float, hours: int = 24, units: str = 
         ValueError: If the API key is missing.
         requests.HTTPError: If the API call fails.
     """
+    # Offline deterministic stub for TEST_MODE
+    if os.getenv("TEST_MODE") == "1":
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        forecasts = []
+        for i in range(min(hours, 6)):
+            t = now + timedelta(hours=i)
+            forecasts.append({
+                "interval": {"startTime": t.isoformat() + "Z"},
+                "weatherCondition": {"description": {"text": "Clear"}, "iconBaseUri": ""},
+                "temperature": {"degrees": 72 + i, "unit": "FAHRENHEIT"},
+                "feelsLikeTemperature": {"degrees": 72 + i, "unit": "FAHRENHEIT"},
+                "relativeHumidity": 40,
+                "precipitation": {"probability": {"percent": 0, "type": "RAIN"}},
+                "wind": {"speed": {"value": 5, "unit": "MILES_PER_HOUR"}, "direction": {"cardinal": "N"}},
+                "cloudCover": 0,
+                "isDaytime": True
+            })
+        return forecasts
+
     api_key = os.getenv("GOOGLE_CLOUD_API_KEY")
     if not api_key:
         raise ValueError("Missing GOOGLE_CLOUD_API_KEY")

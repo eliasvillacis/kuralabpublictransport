@@ -61,6 +61,26 @@ For production or team testing, run everything in containers:
 
 This builds the image, installs dependencies, and starts the FastAPI server (`server.py`) inside Docker. CLI mode is mainly for local dev, while Docker is the recommended way to deploy. Vaya is set up with Render, but you can use whatever you like. 
 
+---
+
+### 4) Deploy on Render
+
+Option A: One-click via `render.yaml` (recommended)
+
+1. Push this repo to GitHub.
+2. In Render, create a new Web Service from your repo. Render will detect `render.yaml`.
+3. Use the Free plan to start; it will build the Dockerfile and run uvicorn.
+4. Health check: Render uses `GET /health`.
+5. Set environment variables in the Render dashboard:
+    - Required in production: `GOOGLE_GENAI_API_KEY`, `GOOGLE_CLOUD_API_KEY`
+    - Optional: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `TRANSITLAND_API_KEY`
+    - For offline testing, you can set `TEST_MODE=1` (no external calls, deterministic stubs)
+
+Notes:
+- The Dockerfile binds to `PORT` if provided (Render sets it automatically).
+- Healthcheck in the container also uses `${PORT}`.
+- `server.py` allows startup in TEST_MODE without LLM keys; in production it uses real keys.
+
 
 ---
 
@@ -85,13 +105,15 @@ Run `python server.py` and use:
 - `POST /whatsapp` — Twilio webhook for WhatsApp integration  
 
 ### WhatsApp (via Twilio)
-1. Set up a Twilio account and WhatsApp sandbox.  
-2. Point your sandbox webhook to your server’s `/whatsapp` endpoint.  
-3. Send messages to your Twilio WhatsApp number.  
+1. Set up a Twilio account and WhatsApp sandbox.
+2. In Twilio Console → Messaging → WhatsApp Sandbox, set the inbound webhook URL to:
+    - `POST https://<your-render-service>.onrender.com/webhook/whatsapp` (or `/whatsapp`, both are available)
+3. In Render, set env vars: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_NUMBER`.
+4. Send messages to your Twilio WhatsApp number; responses are returned as TwiML XML.
+5. Optional: Send a location message; if Twilio forwards `Latitude`/`Longitude`, the server will include it.
 
 ---
 
 ## 📖 System & Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full breakdown of agent roles, request flow, and integration patterns.
-

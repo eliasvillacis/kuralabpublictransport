@@ -4,6 +4,7 @@ FastAPI web server for Vaya. Exposes API endpoints for chat, WhatsApp webhook, a
 Handles context passing, session management, and Twilio integration.
 """
 from fastapi import FastAPI, Request, HTTPException, Form
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -20,11 +21,8 @@ from agents.supervisor import create_supervisor
 
 app = FastAPI(title="Vaya Public Transport Assistant")
 
-# Health check endpoint for Docker and uptime monitoring
-@app.get("/health")
-async def health_check():
-    """Simple health check for Docker/monitoring."""
-    return {"status": "ok"}
+# We capture initialization diagnostics to surface in /health for deployment debugging.
+SUPERVISOR_INIT_ERROR: str | None = None
 
 # CORS configuration (open for dev; restrict in prod)
 app.add_middleware(
@@ -52,11 +50,21 @@ def get_client_ip(request: Request) -> str:
         return forwarded.split(",")[0].strip()
     return request.client.host
 
-# Initialize the supervisor agent (LLM router)
+TEST_MODE = os.getenv("TEST_MODE") == "1"
+# In TEST_MODE we don't require external keys; in normal mode, require LLM and Google Cloud (weather/maps)
+REQUIRED_ENV_VARS = [] if TEST_MODE else [
+    "GOOGLE_GENAI_API_KEY",
+    "GOOGLE_CLOUD_API_KEY",
+]
+
+MISSING_ENV_VARS: list[str] = [k for k in REQUIRED_ENV_VARS if not os.getenv(k)]
+
+# Initialize the supervisor agent (LLM router). In TEST_MODE, allow missing keys.
 try:
     supervisor = create_supervisor()
-except Exception as e:
+except Exception as e:  # pragma: no cover - diagnostic path
     import logging
+    SUPERVISOR_INIT_ERROR = str(e)
     logging.error(f"Failed to initialize supervisor: {e}")
     supervisor = None
 
@@ -71,8 +79,24 @@ def get_twilio_client():
         return None
     return Client(account_sid, auth_token)
 
+@app.get("/health")
+async def health_check():
+    """Rich health/diagnostic endpoint for deployment.
+
+    Returns supervisor status and which critical env vars are missing. This helps quickly
+    debug cloud deployment issues (e.g., container starts but LLM not available).
+    """
+    return {
+        "status": "ok" if supervisor else "degraded",
+        "supervisor_ready": bool(supervisor),
+        "missing_env": MISSING_ENV_VARS,
+        "supervisor_error": SUPERVISOR_INIT_ERROR,
+        "required_env": REQUIRED_ENV_VARS,
+    }
+
 @app.post("/webhook/whatsapp")
 async def whatsapp_webhook(
+    request: Request,
     From: str = Form(...),
     Body: str = Form(...),
     To: str = Form(...),
@@ -86,31 +110,20 @@ async def whatsapp_webhook(
     if not supervisor:
         response = MessagingResponse()
         response.message("Sorry, the assistant is currently unavailable. Please try again later.")
-        return response
+        return Response(content=str(response), media_type="application/xml")
 
     try:
         # Attempt to read optional location fields Twilio may send (not always present)
-        latitude = None
-        longitude = None
-        label = None
-        try:
-            latitude_val = Form("Latitude")
-            longitude_val = Form("Longitude")
-            label_val = Form("Label")
-        except Exception:
-            latitude_val = None
-            longitude_val = None
-            label_val = None
-
+        # Parse any optional WhatsApp location fields if present
+        form = await request.form()
         def to_float(value):
             try:
                 return float(value) if value not in (None, "") else None
             except Exception:
                 return None
-
-        latitude = to_float(latitude_val)
-        longitude = to_float(longitude_val)
-        label = label_val if label_val else None
+        latitude = to_float(form.get("Latitude") or form.get("latitude"))
+        longitude = to_float(form.get("Longitude") or form.get("longitude"))
+        label = form.get("Label") or form.get("label")
 
         client_info = {"from": From, "to": To, "platform": "whatsapp"}
         if latitude is not None and longitude is not None:
@@ -121,13 +134,25 @@ async def whatsapp_webhook(
         response_text = agent_response.get("response", str(agent_response)) if isinstance(agent_response, dict) else str(agent_response)
         twilio_response = MessagingResponse()
         twilio_response.message(response_text)
-        return twilio_response
+        return Response(content=str(twilio_response), media_type="application/xml")
     except Exception as e:
         import logging
         logging.error(f"Error processing WhatsApp message: {e}")
         response = MessagingResponse()
         response.message("Sorry, I encountered an error processing your request. Please try again.")
-        return response
+        return Response(content=str(response), media_type="application/xml")
+
+
+@app.post("/whatsapp")
+async def whatsapp_webhook_alias(
+    request: Request,
+    From: str = Form(...),
+    Body: str = Form(...),
+    To: str = Form(...),
+    MessageSid: str = Form(...)
+):
+    """Alias endpoint for WhatsApp webhook to support /whatsapp path as documented."""
+    return await whatsapp_webhook(request, From, Body, To, MessageSid)
 
 
 @app.post("/chat", response_model=ChatResponse)

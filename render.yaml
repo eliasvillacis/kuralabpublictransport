@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: vaya-api
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: LOG_LEVEL
+        value: INFO
+      # On Render, set these in the dashboard for production
+      # - key: GOOGLE_GENAI_API_KEY
+      #   sync: false
+      # - key: GOOGLE_CLOUD_API_KEY
+      #   sync: false
+      # - key: TWILIO_ACCOUNT_SID
+      #   sync: false
+      # - key: TWILIO_AUTH_TOKEN
+      #   sync: false
+      # - key: TWILIO_WHATSAPP_NUMBER
+      #   sync: false
