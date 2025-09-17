@@ -29,18 +29,6 @@ Vaya keeps things simple: ask in plain language, and get fast weather or transit
 
 > The codebase is set up for Google Maps, Gemini, Transitland, Twilio, and Render. You can substitute other providers with small code changes — see [ARCHITECTURE.md](ARCHITECTURE.md) for integration patterns.
 
-## 🚀 Quick Start
-
-### Prerequisites
-- Docker and Docker Compose (recommended), or Python 3.8+ with virtualenv
-- Google Cloud API key (Maps, Places, Routes, Geolocation, Weather, etc.)
-- Google Gemini API key (LLM)
-- Transitland API key (public transit)
-- Twilio account (WhatsApp integration, optional)
-- Render.com account (cloud deployment, optional)
-
-> The codebase is set up for Google Maps, Gemini, Transitland, Twilio, and Render. You can substitute other providers with small code changes — see [ARCHITECTURE.md](ARCHITECTURE.md) for integration patterns.
-
 ---
 
 ### 1) Clone & Set Up
@@ -106,3 +94,4 @@ Run `python server.py` and use:
 ## 📖 System & Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a full breakdown of agent roles, request flow, and integration patterns.
+
