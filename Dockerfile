@@ -1,42 +1,37 @@
-## Dockerfile for Vaya (Public Transport Assistant)
-FROM python:3.11-slim AS runtime
+# Use Python 3.11 slim image for smaller size
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-	PYTHONUNBUFFERED=1 \
-	PIP_NO_CACHE_DIR=1
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
+# Set working directory
 WORKDIR /app
 
-# Install minimal system utilities (curl for health checks / debugging)
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends curl \
-	&& rm -rf /var/lib/apt/lists/*
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first (layer caching)
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt .
 
-# Copy application source
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
 COPY . .
 
+# Create necessary directories
+RUN mkdir -p data logs
+
 # Create non-root user for security
-RUN useradd -m -u 1001 appuser \
-	&& chown -R appuser:appuser /app
-USER appuser
+RUN useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app
+USER app
 
-# Default environment configuration (override at runtime)
-ENV API_HOST=0.0.0.0 \
-	API_PORT=8000 \
-	LOG_LEVEL=INFO
+# Expose port (if we add web interface later)
+# EXPOSE 8000
 
-# Expose FastAPI port
-EXPOSE 8000
-
-# Health check hitting the /health endpoint (use PORT if provided by platform like Render)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-	CMD curl --fail http://localhost:${PORT:-8000}/health || exit 1
-
-# Start application with uvicorn directly for better prod behavior
-ENV UVICORN_WORKERS=1
-# Use shell form so that env vars expand at runtime; bind to platform PORT if present (Render sets PORT)
-CMD python -m uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000} --workers ${UVICORN_WORKERS:-1}
+# Set entrypoint
+ENTRYPOINT ["python", "main.py"]
