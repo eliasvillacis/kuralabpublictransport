@@ -58,7 +58,7 @@ python main.py
 🤖 Assistant: It's currently 75°F and sunny at your location.
 
 🗨️  You: Where am I?
-🤖 Assistant: You're at approximately 40.7128°N, 74.0060°W (New York City area).
+🤖 Assistant: You are located at [redacted]. This location is based on IP geolocation with approximately 1.1 miles accuracy. Note: IP geolocation may shoocation may show your network's location rather than your physical location. For precise location, use GPS or WiFi-based services.
 ```
 
 ## 💬 What Can Vaya Do?
@@ -140,5 +140,6 @@ User Query → Coordinator → Planning Agent → Execution Agent → Synthesis 
 - Python, LangChain, Google Gemini (LLM), Google Cloud APIs (geocoding, weather)
 
 ## 🙏 Acknowledgments
+
 
 Made with ❤️ for urban explorers who want smart navigation without the battery drain.
