@@ -1,196 +1,229 @@
-<p align="center">
-  <h1>🗺️ Vaya – System Architecture</h1>
-  <p><em>Modular multi-agent conversational AI for urban navigation and travel</em></p>
-</p>
+# 🏗️ Vaya - A2A Multi-Agent Architecture
 
----
+## Core Architecture
 
+### A2A (Agent-to-Agent) Pattern
+**Peer-to-peer agent communication** through shared **WorldState** blackboard pattern.
 
-## 📖 Overview
+**Why A2A vs Traditional Orchestration:**
+- **Decentralized**: No single point of failure
+- **Scalable**: Easy to add/remove agents
+- **Resilient**: System continues if one agent fails
+- **Flexible**: Agents communicate opportunistically
 
-Vaya is a modular, multi-agent conversational AI system for urban navigation and city travel. It features a centralized LLM-driven supervisor (Gemini) that handles all natural language understanding (NLU), query routing, and response synthesis. Specialist agents (weather, transit, traffic, maps, chit-chat) are lightweight, stateless, and API-focused, with robust fallbacks for missing or ambiguous data. The system is optimized for multi-query handling (e.g., "weather here and in Miami"), and is designed for **extensibility, maintainability, and cost-effective deployment** (local Python, Docker, or cloud).
+### Three-Agent System
 
----
+#### Planning Agent
+- **Purpose**: Creates and validates execution plans
+- **Input**: User query + current WorldState
+- **Output**: Step-by-step execution plan
+- **Replanning**: Dynamically modifies plans when execution fails
 
+#### Execution Agent
+- **Purpose**: Executes planned steps using tools
+- **Input**: Plan steps + WorldState
+- **Output**: API results and state updates
+- **Tools**: Weather API, Location services, Geocoding
 
-## 🔄 High-Level Flow
+#### Synthesis Agent
+- **Purpose**: Generates natural language responses
+- **Input**: Execution results + conversation context
+- **Output**: Human-readable final response
+- **Features**: Multi-location synthesis, error handling
 
-User Input (CLI, API, WhatsApp)
-→ `main.py` / `server.py` (entrypoints)
-→ `supervisor.py` (LLM: NLU, routing, NLG, multi-query handling)
-→ `agents/specialists/*` (API calls: weather, maps, traffic, transit; LLM for chit-chat)
-→ `supervisor.py` (LLM synthesis, fallback handling)
-→ Output to user (CLI, WhatsApp via Twilio, web UI, etc.)
+### Plan & Execute Pattern
 
----
-
-
-## ⚙️ Key Components & File-by-File Guide
-
-- **main.py** — CLI entrypoint for local dev/testing. Handles user input, session memory, and passes queries to the supervisor agent. Attempts to determine a default user location at startup.
-- **server.py** — FastAPI web server for API, WhatsApp, and web UI. Exposes endpoints for chat, Twilio webhook, and health checks. Handles context passing and session management.
-- **agents/supervisor.py** — The "brain" of the system:
-  - Uses Gemini LLM for all NLU (intent/entity extraction), query routing, and NLG (response synthesis).
-  - Handles multi-query input (e.g., "weather here and in Miami").
-  - Implements robust fallback logic: if a specialist fails or data is missing, supervisor gracefully explains or suggests alternatives.
-  - Only the supervisor and chit-chat agent use the LLM; all other specialists are pure API wrappers.
-  - Orchestrates the full agent pipeline and returns a single, natural response.
-- **agents/specialists/** — Domain-specific, stateless helpers:
-  - `maps.py` — Geocoding, directions, and place search (Google Maps APIs). No LLM; uses supervisor-extracted info.
-  - `traffic.py` — Real-time road traffic and travel time (Google Routes API). Returns mock data if API key is missing.
-  - `transit.py` — Public transit status, delays, and disruptions (Transitland API). Returns mock data if API key is missing.
-  - `weather.py` — Weather conditions and forecasts (Google Weather API). No LLM; processes structured supervisor data. Handles explicit time/location, geocoding, and fallback to last known or default location.
-  - `chitchat.py` — Handles greetings, fallback, and small talk. Uses Gemini LLM for open-ended conversation and user guidance. If LLM is unavailable, returns a friendly default message.
-- **utils/logger.py** — Centralized logging setup. Ensures consistent log formatting, file/console output, and prevents duplicate logs.
-- **utils/google_maps.py** — Utility functions for geocoding, IP-based location lookup, and address parsing using Google Maps APIs.
-- **logs/app.log** — Log file output (if enabled).
-- **tests/** — Automated tests for agent routing and integration:
-  - `test_routing.py` — Tests agent/supervisor routing logic.
-  - `conftest.py` — Pytest fixtures for test setup.
-- **requirements.txt** — Python dependencies.
-- **.env.example** — Example environment variable file (API keys, config).
-- **docker-compose.yml** — Container orchestration for local/prod deployment.
-
----
-
-
-## 🧩 Agent Roles & Fallbacks
-
-### Supervisor (LLM-Centric)
-- Uses Gemini LLM for all natural language understanding (NLU), query parsing, and response generation (NLG).
-- Extracts intents, times, places, and multi-query structure from user input.
-- Routes queries to the appropriate specialists, including handling multiple requests in a single input.
-- Synthesizes all specialist outputs into a single, natural response.
-- Implements robust fallback logic:
-  - If a specialist fails, returns an error, or data is missing, the supervisor explains the limitation and suggests alternatives.
-  - If the user asks for unsupported features (e.g., weather 30 days out), supervisor gently explains boundaries.
-- Only the supervisor and chit-chat agent use the LLM, keeping costs predictable and logic centralized.
-
-### Specialists (Stateless, API-Driven)
-- **weather, maps, traffic, transit** — Pure API wrappers. No LLM calls. Stateless and fast. Handle ambiguous/missing data by returning clear errors or using fallback locations.
-- **chitchat** — Exception: uses Gemini LLM for open-ended conversation, greetings, and fallback when the user input is not actionable by other agents.
-- All specialists return normalized outputs for supervisor integration.
-- Modular and swappable by design. Each agent is a single file, easy to extend or replace.
-
-
----
-
-
-## 📡 Data Flow (Detailed)
-
-1. **User Input**: CLI, API, or WhatsApp (via Twilio)  
-2. **Entrypoint**: `main.py` or `server.py` captures input and context  
-3. **Supervisor**: Gemini parses, routes to specialists  
-4. **Specialists**: Call APIs, return structured outputs  
-5. **Supervisor**: Synthesizes everything into one response  
-6. **Output**: Returned to CLI, FastAPI Server, or WhatsApp  
-
----
-
-
-## 🔑 Technical Decisions & Optimizations
-
-- **Centralized LLM**: Only the supervisor and chit-chat agent use Gemini. This keeps costs predictable, debugging simple, and logic centralized.
-- **Multi-Query Optimization**: Supervisor can handle multiple requests in a single input (e.g., "weather here and in Miami"). Results are compiled and synthesized into a single, natural response.
-- **Stateless by Default**: Each query is independent (session memory planned for future multi-turn conversations).
-- **Direct Function Calls**: No LangChain `@tool` wrappers — all agent calls are explicit and debuggable.
-- **Robust Fallbacks**: If a specialist fails or data is missing, supervisor and agents provide clear, user-friendly explanations and suggestions.
-- **Environment-Driven Config**: All API keys and config via `.env` for security and portability.
-- **Docker-First**: Local dev supported, but production deployment is optimized with Compose and health checks.
-
----
-
-## 📂 File Structure (Expanded)
-
+#### Planning Phase
 ```
-agents/
-  supervisor.py         # LLM supervisor: NLU, routing, synthesis, fallback logic
-  specialists/
-    maps.py             # Geocoding, directions, place search (Google Maps APIs)
-    traffic.py          # Real-time traffic, travel time (Google Routes API)
-    transit.py          # Public transit status, delays (Transitland API)
-    weather.py          # Weather conditions/forecasts (Google Weather API)
-    chitchat.py         # Chit-chat, fallback, and small talk (Gemini LLM)
-utils/
-  logger.py             # Centralized logging setup
-  google_maps.py        # Geocoding and IP-based location utilities
-logs/
-  app.log               # Log file output (if enabled)
-tests/
-  test_routing.py       # Automated agent/supervisor routing tests
-  conftest.py           # Pytest fixtures for test setup
-main.py                 # CLI entrypoint for local dev/testing
-server.py               # FastAPI web server for API/WhatsApp/web UI
-requirements.txt        # Python dependencies
-.env.example            # Example environment variable file
-docker-compose.yml      # Container orchestration for local/prod deployment
+User Query → Intent Analysis → Step Sequencing → Dependency Mapping → Error Anticipation
 ```
----
 
-## 🧪 Test Suite Deep Dive
+#### Execution Phase
+```
+Plan → Step-by-Step Processing → Real-time Adaptation → Result Aggregation → Quality Assurance
+```
 
-### Goals
-- Fast (seconds) feedback loop
-- Zero dependency on real API keys in CI
-- Deterministic outputs (no LLM paraphrase drift)
-- Validate routing, parsing, and compilation glue—not upstream vendor reliability
+### Smart Replanning
+**Dynamic plan modification** based on runtime conditions:
 
-### Files
-| File | Purpose |
-|------|---------|
-| `tests/conftest.py` | Session‑scoped supervisor fixture + environment setup (`TEST_MODE=1`, dummy `GOOGLE_GENAI_API_KEY`). |
-| `tests/test_routing.py` | Assertions around query classification, agent selection, and response token presence. |
+#### Triggers
+- API failures (service unavailable)
+- Ambiguous results (multiple locations)
+- Incomplete data (missing coordinates)
+- Agent signals (execution blocked)
 
-If more domains are added (e.g., pricing, alerts), prefer adding new focused test modules (`test_transit.py`, etc.) rather than bloating `test_routing.py`.
+#### Process
+```
+Problem Detected → Issue Analysis → New Plan Creation → Revised Execution
+```
 
-### `conftest.py` Mechanics
-1. Inserts project root into `sys.path` (ensures direct import of `agents.supervisor`).
-2. Forces a harmless dummy `GOOGLE_GENAI_API_KEY` so code paths that merely check key presence don’t crash.
-3. Sets `TEST_MODE=1` to skip LLM instantiation and external calls.
-4. Exposes a `supervisor_instance` fixture returning the callable supervisor entry function.
+### Technology Stack
 
-### Test Mode Behavior (Runtime)
-When `TEST_MODE=1`:
-- Supervisor sets `llm=None`.
-- Query parsing: regex + keyword extraction for weather (“weather in X and Y”).
-- Single / multi‑location weather responses: deterministic stub strings (`<City> now: 70F clear`).
-- Chit‑chat: fixed friendly fallback if LLM absent.
-- No specialist API call is required for multi‑location stubs (early short‑circuit). Single-location may still invoke lightweight specialist logic if desired, but remains deterministic.
+#### LangChain vs LangGraph Decision
 
-### Assertions Strategy
-Each test aims to assert STRUCTURE + INTENT, not style:
-- Agent presence: `"Weather" in agent_names` or `"Chit_Chat"` chosen.
-- Location tokens present for multi‑weather queries.
-- No brittle string matching on full sentences (keeps refactors easy).
+**Current: LangChain**
+- **Rich Tool Ecosystem**: Pre-built Google Maps/Weather integrations
+- **Agent Flexibility**: Easy customization of agent behaviors
+- **Rapid Prototyping**: Quick experimentation and iteration
+- **Community Support**: Extensive documentation and examples
 
-### Adding New Tests
-1. Add or extend a stub path if the new feature would otherwise hit external APIs under `TEST_MODE`.
-2. Write a test asserting minimal contract (e.g., agent routed + key field present in response dict).
-3. Avoid over‑specifying natural language phrasing.
-4. If introducing slow or real network tests, mark them:
-  ```python
-  @pytest.mark.external
-  def test_real_weather_live(): ...
-  ```
-  And exclude them from default CI runs (`pytest -m "not external"`).
+**Alternative: LangGraph**
+- **Visual Workflows**: Graph-based process definition
+- **Built-in State**: Automatic state persistence and recovery
+- **Enterprise Monitoring**: Better observability and debugging
+- **Production Ready**: Structured scaling and reliability
 
-### Common Pitfalls Avoided
-- Flaky LLM responses: eliminated by stubs.
-- Network rate limits / quota: avoided in CI.
-- JSON shape drift from external providers: not asserted in core tests (could be covered by optional integration layer later).
+**Why LangChain for Vaya:**
+- Research/development environment
+- High customization needs
+- Rapid experimentation required
+- Smaller team with deep ML expertise
 
-### Extension Ideas
-- Add schema validation with Pydantic models for agent outputs, then assert `.model_validate()` in tests.
-- Introduce property-based tests (Hypothesis) for parsing edge cases (“weather in   New   York and    Tokyo”).
-- Snapshot test (optional) for multi‑agent synthesis once style stabilizes.
+### A2A vs MCP Architecture
 
-### Why Not More Tests Yet?
-Deliberately minimal to keep maintenance friction low while core architecture evolves. As APIs stabilize, layer deeper validation iteratively.
+| Aspect | A2A (Current) | MCP (Enterprise) |
+|--------|---------------|------------------|
+| **Communication** | Peer-to-peer via WorldState | Client-server with protocol |
+| **Coordination** | Decentralized, emergent | Centralized orchestration |
+| **Scalability** | Horizontal (add agents) | Vertical (scale server) |
+| **Complexity** | Higher (race conditions) | Lower (predictable flow) |
+| **Use Case** | Research/experimentation | Production enterprise |
 
----
+### WorldState - The Central Blackboard
 
-## ✅ Summary
+```python
+class WorldState(BaseModel):
+    meta: Dict[str, Any] = {"sessionId": None, "version": "2.0"}
+    user: Dict[str, Any] = {"locale": "en-US", "timezone": "America/New_York"}
+    query: Dict[str, Any] = {"raw": ""}
+    slots: Slots = Field(default_factory=Slots)  # Origin/Destination
+    context: Dict[str, Any] = {                   # Execution state
+        "plan": {"steps": [], "status": "none"},
+        "completed_steps": [],
+        "lastWeather": {},
+        "units": "imperial"
+    }
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
+    memory: Dict[str, Any] = Field(default_factory=dict)
+```
 
-Vaya is designed to be modular, extensible, and easy to evolve. Its centralized LLM supervisor, agent fallbacks, and clear separation of concerns make it straightforward to extend, debug, and deploy in local or experimental environments. The file-by-file structure and explicit agent roles also help new contributors onboard quickly and understand how each piece fits together. While the architecture lays a strong foundation, production-grade hardening (security, scaling, monitoring) would be needed before a real deployment
+**Key Features:**
+- **Single Source of Truth**: All agents read/write to same state
+- **Immutable Updates**: Changes tracked via deepMerge()
+- **Structured Sharing**: Clear format for different data types
+- **Memory Integration**: Conversation history and preferences
 
----
+### API Integration Architecture
+
+#### Fallback Mechanisms
+```
+Primary Method → Backup Method → Error Handling
+Google Client Library → Direct API Calls → Graceful Failure
+```
+
+#### Resilience Features
+- **Multiple Access Methods**: Official clients + direct HTTP
+- **Rate Limiting**: Built-in delays and retry logic
+- **Error Handling**: Comprehensive exception catching
+- **Caching**: Memory-based result caching
+
+### Error Handling Layers
+
+#### 1. Tool Level
+```python
+try:
+    result = api_call()
+    return {"success": True, "data": result}
+except APIError:
+    return {"success": False, "error": str(e)}
+```
+
+#### 2. Agent Level
+```python
+if tool_failed:
+    new_plan = create_backup_plan()
+    execute_revised_plan(new_plan)
+```
+
+#### 3. System Level
+```python
+"API rate limit exceeded" → "Please wait a moment, then try again"
+"Location not found" → "I couldn't find that location. Could you be more specific?"
+```
+
+### Scaling Considerations
+
+#### Current (Research & Development)
+- Single process architecture
+- File-based memory persistence
+- Simple logging and monitoring
+- Local state management
+
+#### Enterprise Evolution
+- **Phase 1**: Add observability (centralized logging, monitoring)
+- **Phase 2**: Distributed state (Redis, databases, message queues)
+- **Phase 3**: Production infrastructure (load balancing, containers)
+- **Phase 4**: Enterprise features (multi-tenant, compliance)
+
+### Key Technical Innovations
+
+1. **Emergent Intelligence**: Agents solve problems creatively through collaboration
+2. **Dynamic Replanning**: Real-time plan modification without restart
+3. **Memory-Augmented Conversations**: Context-aware responses with preference learning
+4. **API Resilience**: Multiple fallback mechanisms for reliability
+5. **Peer-to-Peer Coordination**: Direct agent communication without rigid hierarchies
+
+### File Structure
+
+#### Core Components
+- `main.py`: CLI interface and system bootstrap
+- `agents/coordinator.py`: A2A coordinator managing agent interactions
+- `agents/agents.py`: Three specialized agents (Planning, Execution, Synthesis)
+- `agents/tools/`: API integration tools (weather, location)
+- `utils/contracts.py`: Pydantic data models and validation
+- `utils/state.py`: State management and deepMerge utilities
+- `utils/logger.py`: Centralized logging configuration
+
+#### Data & Configuration
+- `data/conversation_memory.json`: Persistent conversation history
+- `requirements.txt`: Python dependencies
+- `logs/app.log`: Application logging
+
+### Development Workflow
+
+#### Local Setup
+```bash
+pip install -r requirements.txt
+# Set environment variables: GEMINI_API_KEY, GOOGLE_API_KEY
+python -m main
+```
+
+#### Testing Strategy
+```bash
+pytest -q  # Run all tests
+# Mock LLMs and tools for unit tests
+# Test runTurn() with mocked components
+```
+
+#### Debugging Approach
+- **Logs**: `utils/logger.get_logger(__name__)` → `logs/app.log`
+- **State Tracing**: WorldState dumps after each execution step
+- **Tool Debugging**: Raw API responses in `deltaState.evidence`
+- **LLM Debugging**: Enable DEBUG logging for prompts/responses
+
+### Enterprise Migration Path
+
+**When to Switch to MCP/LangGraph:**
+- Production deployment requirements
+- Large-scale user serving
+- Enterprise compliance needs
+- Team growth and structure changes
+
+**Migration Benefits:**
+- Better observability and monitoring
+- Predictable performance characteristics
+- Easier debugging and troubleshooting
+- Built-in enterprise features
+
+This A2A architecture provides a solid foundation for multi-agent systems with research-friendly flexibility while maintaining clear paths to enterprise scaling.

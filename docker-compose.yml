@@ -1,16 +1,38 @@
-# docker-compose.yml
+version: '3.8'
+
 services:
-  api:
+  vaya:
     build: .
-    ports:
-      - "8000:8000"
-    # Load all sensitive values from local .env (NOT committed). Only overrides listed here.
-    env_file:
-      - .env
+    container_name: vaya-transport-assistant
+    restart: unless-stopped
+
+    # Environment variables - set these in your .env file or pass them
     environment:
-      # Safe overrides / optional runtime flags
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      TEST_MODE: ${TEST_MODE:-0}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - PYTHONUNBUFFERED=1
+
+    # Mount volumes for persistent data
     volumes:
-      - ./logs:/app/logs  # Mount logs directory for persistence
-    restart: unless-stopped  # Auto-restart if it crashes
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    # Interactive terminal for CLI
+    stdin_open: true
+    tty: true
+
+    # Health check (optional)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Resource limits (optional)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M

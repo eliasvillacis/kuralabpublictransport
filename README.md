@@ -1,119 +1,144 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Vaya-1.0-222222?style=for-the-badge" alt="Vaya" />
-</p>
+# 🚶‍♀️ Vaya - Your Urban Navigation Companion
 
-<h1 align="center">🗺️ Vaya</h1>
+**A lightweight, AI-powered complement to traditional navigation apps.** Get real-time weather, location info, and navigation guidance without draining your battery or overheating your phone.
 
-<p align="center"><em>Conversational AI for city navigation, weather, transit, and more.</em></p>
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 
----
+## ✨ What is Vaya?
 
-## 📖 Overview
+Vaya is your smart urban companion that **complements** traditional navigation apps. While maps apps focus on visual navigation, Vaya provides conversational intelligence:
 
-Vaya isn’t trying to replace full-featured navigation apps like Google Maps or Waze. Instead, it’s a lightweight, conversational companion built for pedestrians and public transit riders. Large apps already cover turn-by-turn driving, charging stations, and detailed transit feeds — but they can feel heavy, drain battery with constant GPS, and bury updates inside menus.
+- 🌤️ **Real-time weather** at your location or destination
+- 📍 **Smart location services** without constant GPS tracking
+- 🧠 **AI-powered conversations** that understand your needs
+- 🔋 **Battery-friendly** - uses APIs efficiently, not constant location tracking
+- 📱 **Lightweight** - no heavy maps rendering or background processes
 
-Vaya keeps things simple: ask in plain language, and get fast weather or transit checks, disruption alerts, or directions that live right in your chat. No constant tracking — just lightweight, on-demand insights with real-time updates when they matter. Directions stay in the conversation, making them easier to reference without reopening a map. The goal is confidence and clarity in your journey, without the overhead of a full navigation stack.
+### Why Vaya?
 
+Vaya works alongside your favorite navigation apps, providing what they can't:
 
----
+| Traditional Maps Apps | Vaya |
+|----------------------|------:|
+| 🔋 Heavy battery drain | ⚡ API-efficient, minimal battery use |
+| 🌡️ Device overheating | ❄️ Lightweight processing |
+| 🗺️ Full map rendering | 💬 Conversational interface |
+| 📍 Constant GPS tracking | 🎯 Smart, on-demand location |
+| 💾 Large app size | 🪶 Minimal footprint |
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Docker and Docker Compose (recommended), or Python 3.8+
-- Google Cloud API key (Maps, Places, Routes, Geolocation, Weather, etc.)
-- Google Gemini API key (LLM)
-- Transitland API key (public transit)
-- Twilio account (WhatsApp integration, optional)
-- Render.com account (cloud deployment, optional)
+### 1. Install Dependencies
 
-> The codebase is set up for Google Maps, Gemini, Transitland, Twilio, and Render. You can substitute other providers with small code changes — see [ARCHITECTURE.md](ARCHITECTURE.md) for integration patterns.
+```bash
+pip install -r requirements.txt
+```
 
----
+### 2. Set Up API Keys
 
-### 1) Clone & Set Up
-    git clone <repo-url>
-    cd kuralabpublictransport
-    cp .env.example .env   # then edit with your API keys
+Copy the example `.env.example` to `.env` and fill in your keys:
 
----
+```bash
+cp .env.example .env
+# Edit .env and add your keys
+# GEMINI_API_KEY=your_gemini_api_key_here
+# GOOGLE_API_KEY=your_google_api_key_here
+```
 
-### 2) Local Development
+### 3. Start Vaya (local)
 
-Create and activate a virtual environment (recommended):  
-    python -m venv .venv
-    source .venv/bin/activate   # Linux/macOS
-    .venv\Scripts\activate      # Windows
-    pip install -r requirements.txt
+```bash
+python main.py
+```
 
-Run in **CLI mode** for quick testing:  
-    python main.py
+### 4. Try It Out (example interactions)
 
-Or run the **API server** (FastAPI, useful for WhatsApp/other webhook testing):  
-    python server.py
+```
+🗨️  You: What's the weather like?
+🤖 Assistant: It's currently 75°F and sunny at your location.
 
----
+🗨️  You: Where am I?
+🤖 Assistant: You're at approximately 40.7128°N, 74.0060°W (New York City area).
+```
 
-### 3) Deployment with Docker
+## 💬 What Can Vaya Do?
 
-For production or team testing, run everything in containers:  
-    docker-compose up --build
+- Provide current weather and forecasts for your location or destinations
+- Geocode place names and resolve coordinates
+- Give public transit and routing suggestions (where transit data is available)
+- Maintain short-term conversation memory and preferences
 
-This builds the image, installs dependencies, and starts the FastAPI server (`server.py`) inside Docker. CLI mode is mainly for local dev, while Docker is the recommended way to deploy. Vaya is set up with Render, but you can use whatever you like. 
+## 🏗️ How It Works
 
----
+Vaya uses a **multi-agent A2A (Agent-to-Agent)** architecture where specialized agents work together:
 
-### 4) Deploy on Render
+- **Planning Agent**: Creates execution plans from user queries
+- **Execution Agent**: Calls external APIs (weather, geocoding, etc.) using small, focused tools
+- **Synthesis Agent**: Produces natural-language responses from the world state
+- **Coordinator**: Manages agent interactions, replanning, and memory
 
-Option A: One-click via `render.yaml` (recommended)
+### Processing Flow
+1. User asks a question
+2. Planner makes a plan (geolocate/geocode, weather, transit)
+3. Executor runs the plan and updates WorldState
+4. Synthesizer converts the final WorldState into a user-facing message
 
-1. Push this repo to GitHub.
-2. In Render, create a new Web Service from your repo. Render will detect `render.yaml`.
-3. Use the Free plan to start; it will build the Dockerfile and run uvicorn.
-4. Health check: Render uses `GET /health`.
-5. Set environment variables in the Render dashboard:
-    - Required in production: `GOOGLE_GENAI_API_KEY`, `GOOGLE_CLOUD_API_KEY`
-    - Optional: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER`, `TRANSITLAND_API_KEY`
-    - For offline testing, you can set `TEST_MODE=1` (no external calls, deterministic stubs)
+## 📋 Requirements
 
-Notes:
-- The Dockerfile binds to `PORT` if provided (Render sets it automatically).
-- Healthcheck in the container also uses `${PORT}`.
-- `server.py` allows startup in TEST_MODE without LLM keys; in production it uses real keys.
+### Option 1: Native Python
+- Python 3.8 or higher (3.11 recommended)
+- API Keys: Google Gemini API + Google Cloud API
+- Internet access for API calls
 
+### Option 2: Docker (Recommended)
+- Docker 20.10+ and Docker Compose 2.0+
+- Use the `.env` file for credentials (see `.env.example`)
 
----
+**Benefits of Docker:** reproducible environment, easy deployments, and no local Python version conflicts.
 
-## ✨ Features
+## 🐳 Docker (quick)
 
-- Conversational city navigation (weather, transit, traffic, maps)  
-- Multi-agent architecture (LLM supervisor + specialist agents)  
-- Runs as CLI or FastAPI server; WhatsApp via Twilio webhook  
-- Modular, extensible, and Docker-ready  
+Copy `.env.example` to `.env`, fill in API keys, then build and start with Docker Compose:
 
----
+```bash
+cp .env.example .env
+docker-compose up --build
+```
 
-## 💻 Usage
+Persistent data (conversation memory) and logs are stored in `./data` and `./logs` via volumes.
 
-### CLI
-Run `python main.py` and ask something like:  
-> “What’s the weather at Union Square at 1 pm?”
+## 🛠️ Advanced Usage
 
-### API Server (FastAPI)
-Run `python server.py` and use:  
-- `POST /chat` — body: `{ "message": "..." }`  
-- `POST /whatsapp` — Twilio webhook for WhatsApp integration  
+### CLI Commands
 
-### WhatsApp (via Twilio)
-1. Set up a Twilio account and WhatsApp sandbox.
-2. In Twilio Console → Messaging → WhatsApp Sandbox, set the inbound webhook URL to:
-    - `POST https://<your-render-service>.onrender.com/webhook/whatsapp` (or `/whatsapp`, both are available)
-3. In Render, set env vars: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_NUMBER`.
-4. Send messages to your Twilio WhatsApp number; responses are returned as TwiML XML.
-5. Optional: Send a location message; if Twilio forwards `Latitude`/`Longitude`, the server will include it.
+```bash
+python main.py  # Interactive CLI
+# Commands available: exit/quit, reset, memory, status
+```
 
----
+### Configuration
 
-## 📖 System & Architecture
+You can toggle coordinator behavior in `main.py` or the coordinator module (e.g., `replanning_enabled`, `max_iterations`).
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for a full breakdown of agent roles, request flow, and integration patterns.
+### Testing
+
+```bash
+pytest  # Run project tests
+```
+
+<!-- Troubleshooting removed to keep README concise. See the project's README or docs for troubleshooting tips. -->
+
+## 📊 Architecture (For Developers)
+
+Vaya's architecture centers on a shared WorldState (blackboard) updated by agents. Tools return deltaState patches and `deepMerge()` is used to apply them.
+
+```
+User Query → Coordinator → Planning Agent → Execution Agent → Synthesis Agent → Response
+```
+
+### Tech Stack
+- Python, LangChain, Google Gemini (LLM), Google Cloud APIs (geocoding, weather)
+
+## 🙏 Acknowledgments
+
+Made with ❤️ for urban explorers who want smart navigation without the battery drain.

@@ -1,15 +1,53 @@
-# .dockerignore
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-# .env  # Commented out - we need .env in Docker for API keys
-.venv
-venv/
-.git/
-.gitignore
-README.md
-Dockerfile
-.dockerignore
-logs/*.log
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Logs and data (mounted as volumes)
+logs/
+data/
+
+# Documentation (not needed in container)
+*.md
+docs/
+
+# Development files
+docker-compose.override.yml
+Dockerfile.dev
+
+# Test files (if not needed in production)
+tests/
+test_*.py
+*_test.py
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
