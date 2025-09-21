@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 from langchain_core.tools import tool
+from langchain_core.language_models import BaseLanguageModel
 
 logger = logging.getLogger(__name__)
 
