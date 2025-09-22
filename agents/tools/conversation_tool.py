@@ -1,5 +1,6 @@
 import logging
 from langchain_core.tools import tool
+from langchain_core.language_models import BaseLanguageModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
 from utils.llm_logger import log_llm_usage
