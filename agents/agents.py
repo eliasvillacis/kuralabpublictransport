@@ -1,29 +1,41 @@
-"""
-Base agent classes for A2A (Agent-to-Agent) architecture.
+﻿"""
+Kura Public Transport Assistant - Agent Architecture
 
-This module provides the foundation for agents that can participate in
-peer-to-peer communication within the multi-agent system.
+Two-agent architecture for transportation assistance:
+- Planner (LLM): Produces structured JSON plans for user queries
+- Executor (LLM + tools): Executes plan steps and generates final responses
+
+WorldState remains the canonical blackboard; agents communicate via deltaState patches.
 """
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
+import os
 from datetime import datetime
+import json
+import re
 from utils.contracts import WorldState
 from utils.logger import get_logger
+from utils.llm_logger import log_llm_usage
+from utils.state import deepMerge, compact_world_state
 from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Tool imports
 from agents.tools.weather_tool import weather_current
 from agents.tools.location_tool import geocode_place, geolocate_user, reverse_geocode
 from agents.tools.conversation_tool import handle_conversation
+from agents.tools.directions_tool import directions
 
 logger = get_logger(__name__)
 
+
 class BaseAgent(ABC):
-    """Base class for all A2A agents."""
+    """Base class for all agents in the A2A architecture."""
 
     def __init__(self, name: str, model_name: str = "gemini-1.5-flash", temperature: float = 0.2):
         self.name = name
         self.llm = self._initialize_llm(model_name, temperature)
-        self.memory_context = {}
+        # No FORCE_LLM enforcement by default; fallbacks allowed when LLM unavailable
 
     def _initialize_llm(self, model_name: str, temperature: float) -> Optional[ChatGoogleGenerativeAI]:
         """Initialize LLM client."""
@@ -43,928 +55,816 @@ class BaseAgent(ABC):
             logger.error(f"Failed to initialize LLM for agent {self.name}: {e}")
             return None
 
+    def _llm_json_request(self, prompt: str, attempts: int = 3, sleep_between: float = 0.5) -> Optional[dict]:
+        """Ask the LLM to return JSON only. Retry a few times if the response isn't valid JSON.
+
+        Returns the parsed JSON dict on success, or None on failure.
+        """
+        if not self.llm:
+            return None
+
+        last_resp_text = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = self.llm.invoke(prompt)
+                text = str(getattr(resp, 'content', resp)).strip()
+                last_resp_text = text
+                # extract the first {...} block
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                candidate = m.group(0) if m else text
+                try:
+                    parsed = json.loads(candidate)
+                    return parsed
+                except Exception as e:
+                    logger.warning(f"BaseAgent: LLM JSON parse failed on attempt {attempt}: {e}")
+                    # prepare corrective prompt for next attempt
+                    prompt = (
+                        "The previous response was not valid JSON. Reply ONLY with valid JSON and nothing else. "
+                        "Here was the previous response:\n" + text + "\nPlease return only JSON now."
+                    )
+            except Exception as e:
+                logger.warning(f"BaseAgent: LLM invoke failed on attempt {attempt}: {e}")
+            try:
+                import time
+                time.sleep(sleep_between)
+            except Exception:
+                pass
+
+        # log final raw text for debugging
+        logger.debug(f"BaseAgent: LLM final non-JSON response after {attempts} attempts: {last_resp_text}")
+        return None
+
     @abstractmethod
     def get_name(self) -> str:
-        """Return the agent's name."""
+        """Return the agent\'s name."""
         return self.name
 
     @abstractmethod
     def can_handle(self, world_state: WorldState) -> bool:
         """Check if agent can contribute to current state."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def process(self, world_state: WorldState) -> Dict[str, Any]:
         """Process the current state and return deltaState patch."""
-        pass
+        raise NotImplementedError
 
-    def should_replan(self, world_state: WorldState) -> bool:
-        """Check if replanning is needed. Default implementation."""
-        # Check for errors that might require replanning
-        if world_state.errors:
-            return True
-
-        # Check if current plan is incomplete or invalid
-        if "plan" in world_state.context:
-            plan = world_state.context["plan"]
-            if not plan.get("steps"):
-                return True
-
-        return False
-
-    def update_memory_context(self, context: Dict[str, Any]):
-        """Update agent's memory context."""
-        self.memory_context.update(context)
-
-    def get_memory_context(self) -> Dict[str, Any]:
-        """Get agent's current memory context."""
-        return self.memory_context.copy()
 
 class PlanningAgent(BaseAgent):
-    """Agent responsible for creating and updating plans."""
+    """LLM-powered PlanningAgent that creates structured execution plans."""
 
     def __init__(self):
+        # Planner should use a low-temperature, more deterministic model
         super().__init__("planner", "gemini-1.5-flash", 0.2)
         self.planning_prompt = """
-You are the Planning Agent in an A2A multi-agent system. Your role is to create and update execution plans.
+You are the Planning Agent in a transportation assistant system. Analyze user queries and create structured execution plans.
 
-Current WorldState: {world_state}
+Available actions:
+- Geolocate: Get user's current location (use for "near me", "here", "my location")
+- Geocode: Convert address to coordinates (use for specific addresses)
+- ReverseGeocode: Convert coordinates to human-readable address
+- Weather: Get current weather conditions
+- Directions: Get directions between locations (automatically handles geolocation, geocoding, and transit/walking modes)
+- Conversation: Handle casual conversation and greetings
 
-Based on the current state, determine what steps need to be taken to fulfill the user's query.
-Consider:
-- What information is already available
-- What steps have been completed (check completed_steps list)
-- What errors have occurred
-- What additional steps are needed
+CRITICAL: Return ONLY a valid JSON object with this exact structure:
+{
+  "steps": [
+    {
+      "id": "S1",
+      "action": "ActionName",
+      "args": {"key": "value"}
+    }
+  ],
+  "status": "planning",
+  "confidence": 0.9
+}
 
-CRITICAL: Do NOT create duplicate steps. If a step has already been completed (appears in completed_steps), do NOT include it in the new plan.
+Examples:
+For "weather near me":
+{
+  "steps": [
+    {"id": "S1", "action": "Geolocate", "args": {}},
+    {"id": "S2", "action": "Weather", "args": {}}
+  ],
+  "status": "planning",
+  "confidence": 0.9
+}
 
-Output a JSON plan with the following structure:
-{{
-    "steps": [
-        {{
-            "id": "S1",
-            "action": "Geolocate|Geocode|Weather|Transit",
-            "args": {{...}},
-            "reasoning": "Why this step is needed"
-        }}
-    ],
-    "status": "planning|replanning|complete",
-    "confidence": 0.0-1.0
-}}
+For "directions to Central Park":
+{
+  "steps": [
+    {"id": "S1", "action": "Directions", "args": {"destination": "Central Park"}}
+  ],
+  "status": "planning",
+  "confidence": 0.9
+}
 
-Rules:
-- For location queries like "where am i", "what's my location", "where am I located", "where am I": FIRST Geolocate to get coordinates, THEN ReverseGeocode to convert coordinates to address
-- For location queries without specific places: include Geolocate step first, then create Weather step using the geocoded coordinates
-- For specific place names: include Geocode step for that place with the place name as the "address" parameter, then create Weather step using the geocoded coordinates
-- For weather queries with multiple locations (e.g., "weather in Miami and Texas" or "weather near me, in Miami, in Texas"): create separate Geocode/Geolocate + Weather steps for EACH location mentioned
-- For transit queries (e.g., "from X to Y"): include separate Geocode steps for both origin and destination locations
-- Weather steps need lat/lng coordinates
-- ALWAYS create a Weather step immediately after each Geocode/Geolocate step for weather queries
-- ONLY include steps that have NOT been completed yet (check completed_steps array)
-- If all needed steps are already completed, set status to "complete"
-- Set confidence based on how well the plan addresses the query
-- ALWAYS include the "address" parameter in Geocode step args, never leave it empty
-- For multiple locations in weather queries, use sequential step IDs (S1, S2, S3, etc.) and create both Geocode/Geolocate and Weather steps for each location
+Guidelines:
+- For directions queries: Use Directions action (handles everything automatically)
+- For weather queries with "near me": Use Geolocate, then Weather
+- For weather at specific location: Use Geocode, then Weather
+- For location queries ("where am I"): Use Geolocate, then ReverseGeocode
+- For casual conversation: Use Conversation
+
+Query: {query}
+
+Return only the JSON, no other text.
 """
 
     def get_name(self) -> str:
-        """Return the agent's name."""
+        """Return the agent\'s name."""
         return self.name
 
     def can_handle(self, world_state: WorldState) -> bool:
-        """Planning agent can always contribute when there's a query."""
+        """Planning agent can handle when there\'s a user query."""
         return bool(world_state.query.get("raw"))
 
     def process(self, world_state: WorldState) -> Dict[str, Any]:
-        """Generate or update execution plan."""
+        """Generate execution plan for user query."""
+        query = world_state.query.get("raw", "")
+        if not query:
+            return {"deltaState": {"context": {"plan": {"steps": [], "status": "complete"}}}}
+        # Try LLM planning first. Support limited retries for transient LLM failures.
+        max_retries = 2
         if not self.llm:
-            return {"deltaState": {"errors": ["Planning LLM not available"]}}
+            logger.info("PlanningAgent: No LLM client available; falling back to heuristic planning")
+            return self._heuristic_plan(query)
 
-        try:
-            # Build context for planning
-            context = {
-                "query": world_state.query.get("raw", ""),
-                "current_slots": world_state.slots.model_dump(),
-                "existing_plan": world_state.context.get("plan", {}),
-                "completed_steps": world_state.context.get("completed_steps", []),
-                "errors": world_state.errors
-            }
-
-            # Extract existing_plan for easier reference
-            existing_plan = context["existing_plan"]
-            completed_steps = context["completed_steps"]
-
-            # Check for casual conversation and greetings - handle with Conversation tool
-            query_text = context.get("query", "").lower().strip()
-            casual_phrases = [
-                "hi", "hello", "hey", "how are you", "how r u", "what's up", "sup",
-                "good morning", "good afternoon", "good evening", "did you", "do you",
-                "are you", "can you", "what do you", "who are you", "what are you",
-                "why", "when", "where", "how", "what", "which", "who", "whose",
-                "bye", "goodbye", "see you", "thanks", "thank you", "yes", "yeah",
-                "yep", "sure", "okay", "ok", "alright", "fine", "tell me", "nice",
-                "beautiful", "bored", "nothing", "just", "morning", "afternoon", "evening"
-            ]
-            is_casual = any(phrase in query_text for phrase in casual_phrases) or len(query_text.split()) <= 5
-            if is_casual and not any(word in query_text for word in ["weather", "location", "where am i", "transit", "route", "directions", "from", "to", "bus", "train", "subway", "drive", "walk", "bike"]):
-                # For casual conversation, create a plan with Conversation tool
-                plan = {
-                    "steps": [
-                        {
-                            "id": "S1",
-                            "action": "Conversation",
-                            "args": {"message": context.get("query", "")},
-                            "reasoning": "Handle casual conversation and redirect to transportation assistance"
-                        }
-                    ],
-                    "status": "planning",
-                    "confidence": 0.9
-                }
-                return {
-                    "deltaState": {
-                        "context": {
-                            "plan": plan,
-                            "last_planning": {
-                                "timestamp": str(datetime.now()),
-                                "agent": self.name
-                            }
-                        }
-                    },
-                    "snippet": f"Planning complete. Generated {len(plan.get('steps', []))} steps with {plan.get('confidence', 0.0):.1f} confidence."
-                }
-
-            # Check for location queries and handle them explicitly
-            is_location_query = any(phrase in query_text for phrase in [
-                "where am i", "where am i?", "what's my location", "where am i located", 
-                "where am i right now", "my location", "current location", "where am i at"
-            ])
-            is_weather_query = any(word in query_text for word in ["weather", "temperature", "forecast", "rain", "sunny", "cloudy", "hot", "cold", "weatehr"])  # Include common typos
-            
-            # Handle location queries regardless of completed steps
-            if is_location_query:
-                # Check if we need to add location-related steps
-                needs_geolocate = not any(step["id"] == "S1" for step in existing_plan.get("steps", []))
-                needs_reverse_geocode = not any(step["id"] == "S2" for step in existing_plan.get("steps", []))
-                needs_weather = is_weather_query and not any(step["id"] == "S3" for step in existing_plan.get("steps", []))
-                
-                new_steps = []
-                step_counter = len(existing_plan.get("steps", [])) + 1
-                
-                if needs_geolocate:
-                    new_steps.append({
-                        "id": f"S{step_counter}",
-                        "action": "Geolocate",
-                        "args": {},
-                        "reasoning": "Get user's current coordinates for location query"
-                    })
-                    step_counter += 1
-                    
-                if needs_reverse_geocode:
-                    new_steps.append({
-                        "id": f"S{step_counter}",
-                        "action": "ReverseGeocode", 
-                        "args": {},
-                        "reasoning": "Convert coordinates to human-readable address"
-                    })
-                    step_counter += 1
-                    
-                if needs_weather:
-                    new_steps.append({
-                        "id": f"S{step_counter}",
-                        "action": "Weather",
-                        "args": {"units": "IMPERIAL"},
-                        "reasoning": "Get current weather for user's location"
-                    })
-                
-                if new_steps:
-                    # Add new steps to existing plan
-                    updated_plan = existing_plan.copy()
-                    updated_plan["steps"] = existing_plan.get("steps", []) + new_steps
-                    updated_plan["status"] = "planning"
-                    
-                    return {
-                        "deltaState": {
-                            "context": {
-                                "plan": updated_plan,
-                                "last_planning": {
-                                    "timestamp": str(datetime.now()),
-                                    "agent": self.name
-                                }
-                            }
-                        },
-                        "snippet": f"Planning updated. Added {len(new_steps)} steps to existing plan."
-                    }
-            
-            if existing_plan.get("steps"):
-                # Filter out completed steps from existing plan
-                pending_steps = [
-                    step for step in existing_plan["steps"] 
-                    if step["id"] not in completed_steps
-                ]
-                
-                # If no pending steps, return complete status
-                if not pending_steps:
-                    return {
-                        "deltaState": {
-                            "context": {
-                                "plan": {
-                                    "steps": [],
-                                    "status": "complete",
-                                    "confidence": 1.0
-                                },
-                                "last_planning": {
-                                    "timestamp": str(datetime.now()),
-                                    "agent": self.name
-                                }
-                            }
-                        },
-                        "snippet": "All planned steps completed."
-                    }
-                
-                # If we have pending steps, continue with the existing plan (don't replan)
-                # This prevents the LLM from regenerating duplicate steps
-                return {
-                    "deltaState": {
-                        "context": {
-                            "plan": {
-                                "steps": pending_steps,
-                                "status": "in_progress", 
-                                "confidence": existing_plan.get("confidence", 0.8)
-                            },
-                            "last_planning": {
-                                "timestamp": str(datetime.now()),
-                                "agent": self.name
-                            }
-                        }
-                    },
-                    "snippet": f"Continuing with {len(pending_steps)} remaining steps."
-                }
-                
-                # Update context with filtered steps
-                context["existing_plan"] = {**existing_plan, "steps": pending_steps}
-
-            # Generate plan using LLM
-            messages = [
-                {"role": "system", "content": self.planning_prompt},
-                {"role": "user", "content": f"Create/update plan for: {context}"}
-            ]
-
-            response = self.llm.invoke(messages)
-            plan_text = response.content.strip()
-
-            # Extract JSON from response
-            import re, json
-            json_match = re.search(r'\{.*\}', plan_text, re.DOTALL)
-            if json_match:
-                plan = json.loads(json_match.group(0))
-            else:
-                plan = {"steps": [], "status": "error", "confidence": 0.0}
-
-            # Return deltaState with plan
+        last_exc = None
+        # Use the helper to request JSON from LLM
+        full_prompt = self.planning_prompt.replace("{query}", query)
+        parsed = self._llm_json_request(full_prompt, attempts=max_retries + 1)
+        if parsed:
+            plan = parsed
+            logger.info(f"PlanningAgent: LLM generated plan with {len(plan.get('steps', []))} steps")
             return {
                 "deltaState": {
                     "context": {
                         "plan": plan,
                         "last_planning": {
-                            "timestamp": str(datetime.now()),
-                            "agent": self.name
+                            "timestamp": str(datetime.utcnow()),
+                            "agent": self.name,
+                            "method": "llm"
                         }
                     }
                 },
-                "snippet": f"Planning complete. Generated {len(plan.get('steps', []))} steps with {plan.get('confidence', 0.0):.1f} confidence."
+                "snippet": f"Generated plan with {len(plan.get('steps', []))} steps"
             }
+        else:
+            logger.warning("PlanningAgent: LLM failed to produce valid JSON plan after retries")
 
-        except Exception as e:
-            logger.error(f"Planning failed: {e}")
+        # If we reach here, LLM planning failed after retries; fall back to heuristics
+        logger.info(f"PlanningAgent: LLM planning failed after retries: {last_exc}; using heuristic fallback")
+        return self._heuristic_plan(query)
+
+    def _heuristic_plan(self, query: str) -> Dict[str, Any]:
+        """Fallback heuristic planning when LLM fails."""
+        q = query.lower()
+
+        # Check for directions queries
+        if any(word in q for word in ["directions", "get to", "how to get", "take me to", "from", "to"]):
             return {
                 "deltaState": {
-                    "errors": [f"Planning error: {str(e)}"],
                     "context": {
-                        "plan": {"steps": [], "status": "error", "confidence": 0.0}
+                        "plan": {
+                            "steps": [{"id": "S1", "action": "Directions", "args": {"destination": query}}],
+                            "status": "planning",
+                            "confidence": 0.8
+                        },
+                        "last_planning": {
+                            "timestamp": str(datetime.utcnow()),
+                            "agent": self.name,
+                            "method": "heuristic"
+                        }
                     }
-                }
+                },
+                "snippet": "Heuristic directions plan"
             }
+
+        # Check for weather queries
+        elif "weather" in q:
+            if "me" in q or "here" in q or "my location" in q:
+                steps = [
+                    {"id": "S1", "action": "Geolocate", "args": {}},
+                    {"id": "S2", "action": "Weather", "args": {}}
+                ]
+            else:
+                location = query.replace("weather", "").replace("in", "").replace("for", "").strip()
+                steps = [
+                    {"id": "S1", "action": "Geocode", "args": {"address": location}},
+                    {"id": "S2", "action": "Weather", "args": {}}
+                ]
+
+            return {
+                "deltaState": {
+                    "context": {
+                        "plan": {
+                            "steps": steps,
+                            "status": "planning",
+                            "confidence": 0.7
+                        },
+                        "last_planning": {
+                            "timestamp": str(datetime.utcnow()),
+                            "agent": self.name,
+                            "method": "heuristic"
+                        }
+                    }
+                },
+                "snippet": f"Heuristic weather plan: {len(steps)} steps"
+            }
+
+        # Default to conversation
+        else:
+            return {
+                "deltaState": {
+                    "context": {
+                        "plan": {
+                            "steps": [{"id": "S1", "action": "Conversation", "args": {"message": query}}],
+                            "status": "planning",
+                            "confidence": 0.6
+                        },
+                        "last_planning": {
+                            "timestamp": str(datetime.utcnow()),
+                            "agent": self.name,
+                            "method": "heuristic"
+                        }
+                    }
+                },
+                "snippet": "Heuristic conversation plan"
+            }
+
 
 class ExecutionAgent(BaseAgent):
-    """Agent responsible for executing planned steps."""
+    """LLM-powered ExecutionAgent that executes plan steps with intelligent reasoning."""
 
     def __init__(self):
-        super().__init__("executor", "gemini-1.5-pro", 0.2)
-        self.execution_prompt = """
-You are the Execution Agent in an A2A multi-agent system. Your role is to execute individual steps from the plan.
-
-Current Step: {current_step}
-World State: {world_state}
-
-Execute this step and return the results. Use available tools to gather information.
-
-Output format:
-{{
-    "deltaState": {{
-        "context": {{
-            "execution_result": {{...}},
-            "completed_steps": ["step_id"]
-        }},
-        "slots": {{...}}  // Update slots if location data found
-    }},
-    "snippet": "Brief description of what was executed and found"
-}}
-
-Available actions: Geolocate, Geocode, Weather, Transit
-"""
+        super().__init__("executor", "gemini-1.5-flash", 0.2)
 
     def get_name(self) -> str:
-        """Return the agent's name."""
+        """Return the agent\'s name."""
         return self.name
 
     def can_handle(self, world_state: WorldState) -> bool:
-        """Execution agent can handle when there's a plan with pending steps."""
+        """Execution agent can handle when there\'s a plan with steps."""
         plan = world_state.context.get("plan", {})
         steps = plan.get("steps", [])
-        completed = world_state.context.get("completed_steps", [])
-
-        # Check if there are uncompleted steps
-        for step in steps:
-            if step["id"] not in completed:
-                return True
-        return False
+        return len(steps) > 0
 
     def process(self, world_state: WorldState) -> Dict[str, Any]:
-        """Execute the next pending step."""
-        if not self.llm:
-            return {"deltaState": {"errors": ["Execution LLM not available"]}}
+        """Use LLM reasoning to execute the plan steps intelligently."""
+        query = world_state.query.get("raw", "")
 
-        try:
-            # Find next pending step
-            plan = world_state.context.get("plan", {})
-            steps = plan.get("steps", [])
-            completed = world_state.context.get("completed_steps", [])
+        if not query:
+            return {"deltaState": {"context": {"execution_result": {"status": "no_query"}}}}
 
-            current_step = None
-            for step in steps:
-                if step["id"] not in completed:
-                    current_step = step
-                    break
+        # Get the plan from PlanningAgent
+        plan = world_state.context.get("plan", {})
+        steps = plan.get("steps", [])
 
-            if not current_step:
-                return {
-                    "deltaState": {
-                        "context": {
-                            "execution_status": "no_pending_steps"
-                        }
-                    }
-                }
+        if not steps:
+            logger.warning("ExecutionAgent: No plan steps to execute")
+            return {"deltaState": {"context": {"execution_result": {"status": "no_plan"}}}}
 
-            # Execute step based on action
-            result = self._execute_step(current_step, world_state)
-
-            # Mark step as completed
-            new_completed = completed + [current_step["id"]]
-
-            # Prepare deltaState updates
-            delta_state = {
-                "context": {
-                    "execution_result": result,
-                    "completed_steps": new_completed,
-                    "last_execution": {
-                        "step_id": current_step["id"],
-                        "timestamp": str(datetime.now()),
-                        "agent": self.name
-                    }
-                }
-            }
-            
-            # If this is a weather step, store the result separately for multi-location synthesis
-            if current_step.get("action") == "Weather" and result.get("status") == "success":
-                # Get existing weather results or create empty dict
-                existing_weather_results = world_state.context.get("weather_results", {})
-                
-                # Use the step ID as the key to store weather data for this location
-                step_id = current_step["id"]
-                existing_weather_results[step_id] = {
-                    "location": {
-                        "lat": result.get("raw", {}).get("context", {}).get("lastWeather", {}).get("lat"),
-                        "lng": result.get("raw", {}).get("context", {}).get("lastWeather", {}).get("lng")
-                    },
-                    "weather": result.get("weather", {}),
-                    "timestamp": str(datetime.now())
-                }
-                
-                delta_state["context"]["weather_results"] = existing_weather_results
-
-            # Update slots and context based on execution result
-            if result.get("status") == "success":
-                if current_step["action"] in ["Geolocate", "Geocode"]:
-                    # Store geocoded location in context for weather steps to reference
-                    location = result.get("location", {})
-                    if location:
-                        # Initialize geocoded_locations if it doesn't exist
-                        if "geocoded_locations" not in delta_state["context"]:
-                            delta_state["context"]["geocoded_locations"] = {}
-                        
-                        # Store location by step ID for weather steps to reference
-                        location_key = f"step_{current_step['id']}"
-                        delta_state["context"]["geocoded_locations"][location_key] = {
-                            "lat": location.get("lat"),
-                            "lng": location.get("lng"),
-                            "name": location.get("name", "Unknown Location"),
-                            "address": current_step.get("args", {}).get("address", "current location")
-                        }
-                        
-                        # Also update origin slot for backward compatibility
-                        delta_state["slots"] = {
-                            "origin": {
-                                "lat": location.get("lat"),
-                                "lng": location.get("lng"),
-                                "name": location.get("name", "Unknown Location")
-                            }
-                        }
-                elif current_step["action"] == "ReverseGeocode":
-                    # Store reverse geocoding result in context
-                    address = result.get("address", "")
-                    address_components = result.get("address_components", {})
-                    if address:
-                        delta_state["context"]["reverse_geocode_result"] = {
-                            "formatted_address": address,
-                            "address_components": address_components,
-                            "coordinates": {
-                                "lat": current_step.get("args", {}).get("lat"),
-                                "lng": current_step.get("args", {}).get("lng")
-                            }
-                        }
-                elif current_step["action"] == "Weather":
-                    # Update context with weather data
-                    weather_data = result.get("weather", {})
-                    if weather_data:
-                        delta_state["context"]["lastWeather"] = weather_data
-                elif current_step["action"] == "Conversation":
-                    # Store conversation response in context
-                    conversation_data = result.get("raw", {}).get("context", {}).get("conversation_response", {})
-                    if conversation_data:
-                        delta_state["context"]["conversation_response"] = conversation_data
-
-            logger.info(f"ExecutionAgent returning deltaState: {delta_state}")
-            return {
-                "deltaState": delta_state,
-                "snippet": f"Executed step {current_step['id']}: {result.get('summary', 'Complete')}"
-            }
-
-        except Exception as e:
-            logger.error(f"Execution failed: {e}")
-            return {
-                "deltaState": {
-                    "errors": [f"Execution error: {str(e)}"]
-                }
-            }
-
-    def _execute_step(self, step: Dict[str, Any], world_state: WorldState) -> Dict[str, Any]:
-        """Execute a specific step based on its action."""
-        action = step.get("action", "")
-        args = step.get("args", {})
-
-        if action == "Geolocate":
-            return self._execute_geolocate()
-        elif action == "Geocode":
-            return self._execute_geocode(args.get("address", ""))
-        elif action == "ReverseGeocode":
-            return self._execute_reverse_geocode(args.get("lat"), args.get("lng"), world_state)
-        elif action == "Weather":
-            return self._execute_weather(args, world_state)
-        elif action == "Conversation":
-            return self._execute_conversation(args.get("message", ""))
+        # Use LLM to intelligently execute the plan steps
+        if self.llm:
+            try:
+                logger.info("ExecutionAgent: Using LLM for intelligent plan execution")
+                execution_results = self._execute_plan_with_llm_reasoning(steps, world_state, query)
+            except Exception as e:
+                logger.warning(f"ExecutionAgent: LLM execution failed: {e}")
+                execution_results = self._execute_plan_steps_fallback(steps, world_state)
         else:
-            return {"summary": f"Unknown action: {action}", "status": "error"}
+            logger.info("ExecutionAgent: No LLM available, using fallback execution")
+            execution_results = self._execute_plan_steps_fallback(steps, world_state)
 
-    def _execute_geolocate(self) -> Dict[str, Any]:
-        """Execute geolocation to find user's current location."""
-        try:
-            result = geolocate_user.invoke({})
-            return {
-                "summary": "User location determined",
-                "location": result.get("slots", {}).get("origin", {}),
-                "status": "success",
-                "raw": result
-            }
-        except Exception as e:
-            return {
-                "summary": f"Geolocation failed: {str(e)}",
-                "status": "error",
-                "error": str(e)
-            }
+        # Generate final response using LLM
+        if self.llm:
+            try:
+                logger.info("ExecutionAgent: Generating final response")
+                context_summary = self._prepare_context_summary(world_state, execution_results)
 
-    def _execute_geocode(self, address: str) -> Dict[str, Any]:
-        """Execute geocoding for a specific address."""
-        try:
-            result = geocode_place.invoke({"address": address})
-            return {
-                "summary": f"Geocoded address: {address}",
-                "location": result.get("slots", {}).get("origin", {}),
-                "status": "success",
-                "raw": result
-            }
-        except Exception as e:
-            return {
-                "summary": f"Geocoding failed for {address}: {str(e)}",
-                "status": "error",
-                "error": str(e)
-            }
+                response_prompt = f"""
+You are the Execution Agent for a transportation assistant. Based on the executed tool results, provide a helpful final response.
 
-    def _execute_reverse_geocode(self, lat: float = None, lng: float = None, world_state: WorldState = None) -> Dict[str, Any]:
-        """Execute reverse geocoding to convert coordinates to human-readable address."""
-        # If coordinates not provided in args, look for them in geocoded locations or origin slot
-        if not lat or not lng:
-            if world_state:
-                # First try geocoded locations (from recent Geolocate step)
-                geocoded_locations = world_state.context.get("geocoded_locations", {})
-                if geocoded_locations:
-                    # Get the most recent geocoding step
-                    location_keys = list(geocoded_locations.keys())
-                    if location_keys:
-                        latest_location = geocoded_locations[location_keys[-1]]
-                        lat = latest_location.get("lat")
-                        lng = latest_location.get("lng")
-                
-                # Fallback to origin slot
-                if not lat or not lng:
-                    lat = world_state.slots.origin.get("lat")
-                    lng = world_state.slots.origin.get("lng")
+User query: {query}
+Tool execution results: {context_summary}
 
-        if not lat or not lng:
-            return {"summary": "Missing coordinates for reverse geocoding", "status": "error"}
+Guidelines:
+- For directions: Provide clear route information with transit/walking options
+- For weather: Include temperature, conditions, and relevant details
+- For locations: Provide readable addresses, not coordinates
+- Be helpful and provide complete answers
+- If something went wrong, provide graceful fallback responses
 
-        try:
-            result = reverse_geocode.invoke({"lat": lat, "lng": lng})
-            reverse_data = result.get("context", {}).get("reverse_geocode_result", {})
-            return {
-                "summary": f"Reverse geocoded coordinates: {lat}, {lng}",
-                "address": reverse_data.get("formatted_address", "Unknown address"),
-                "address_components": reverse_data.get("address_components", {}),
-                "status": "success",
-                "raw": result
-            }
-        except Exception as e:
-            return {
-                "summary": f"Reverse geocoding failed for {lat}, {lng}: {str(e)}",
-                "status": "error",
-                "error": str(e)
-            }
-
-    def _execute_weather(self, args: Dict[str, Any], world_state: WorldState) -> Dict[str, Any]:
-        """Execute weather lookup."""
-        lat = args.get("lat")
-        lng = args.get("lng")
-        
-        # If coordinates not provided in args, look for them in geocoded locations
-        if not lat or not lng:
-            geocoded_locations = world_state.context.get("geocoded_locations", {})
-            
-            # For weather steps, try to find the most appropriate geocoded location
-            # This is a heuristic: use the most recently geocoded location
-            if geocoded_locations:
-                # Get the most recent geocoding step
-                location_keys = list(geocoded_locations.keys())
-                if location_keys:
-                    latest_location = geocoded_locations[location_keys[-1]]
-                    lat = latest_location.get("lat")
-                    lng = latest_location.get("lng")
-
-        # Fallback to origin slot
-        if not lat or not lng:
-            lat = world_state.slots.origin.get("lat")
-            lng = world_state.slots.origin.get("lng")
-
-        if not lat or not lng:
-            return {"summary": "Missing coordinates for weather lookup", "status": "error"}
-
-        try:
-            result = weather_current.invoke({"lat": lat, "lng": lng, "units": args.get("units", "IMPERIAL")})
-            weather_data = result.get("context", {}).get("lastWeather", {})
-            return {
-                "summary": f"Weather data retrieved for {lat}, {lng}",
-                "weather": {
-                    "temperature": weather_data.get("temp"),
-                    "conditions": weather_data.get("summary", ""),
-                    "humidity": weather_data.get("humidity"),
-                    "wind_speed": weather_data.get("wind_speed"),
-                    "feels_like": weather_data.get("feels_like")
-                },
-                "status": "success",
-                "raw": result
-            }
-        except Exception as e:
-            return {
-                "summary": f"Weather lookup failed: {str(e)}",
-                "status": "error",
-                "error": str(e)
-            }
-
-    def _execute_conversation(self, message: str) -> Dict[str, Any]:
-        """Execute conversation handling."""
-        try:
-            result = handle_conversation.invoke({"message": message})
-            conversation_data = result.get("context", {}).get("conversation_response", {})
-            
-            return {
-                "summary": f"Handled conversation: {conversation_data.get('response_type', 'general')}",
-                "response": conversation_data.get("response_text", ""),
-                "status": "success",
-                "raw": result
-            }
-        except Exception as e:
-            return {
-                "summary": f"Conversation handling failed: {str(e)}",
-                "status": "error",
-                "error": str(e)
-            }
-
-class SynthesisAgent(BaseAgent):
-    """Agent responsible for synthesizing final responses."""
-
-    def __init__(self):
-        super().__init__("synthesizer", "gemini-1.5-flash", 0.2)  # Changed from pro to flash for cost savings
-        self.synthesis_prompt = """
-You are the Synthesis Agent in an A2A multi-agent system. Your role is to create natural, user-friendly responses from collected data.
-
-World State: {world_state}
-
-Based on all the collected information, create a comprehensive response to the user's original query.
-Consider:
-- Weather information in context.lastWeather
-- Location data in slots.origin/destination
-- Reverse geocoding results in context.reverse_geocode_result
-- Location accuracy information in context.accuracy and context.accuracy_note
-- Any errors that occurred
-- Completed execution results
-
-For location queries like "where am i", ALWAYS use the reverse geocoding result (context.reverse_geocode_result.formatted_address) to provide a human-readable address. NEVER display raw coordinates like "40.6847488, -73.8295808" to users - always convert them to readable addresses first.
-
-For weather information:
-- Only mention "feels like" temperature if it's different from the actual temperature
-- Format temperatures as "77.1°F" (keep natural precision)
-- Do NOT round location accuracy values - keep them as precise as possible
-
-If location accuracy information is available AND the user asked about location, mention it to help users understand the precision of the location data (e.g., "This location is based on IP geolocation with approximately 1.1 miles accuracy").
-
-For transit queries, if you have geocoded locations but no transit directions, explain that transit planning is not yet available but you can provide location information.
-
-Output a single, natural-language response suitable for a user. Do not output JSON, just the response text.
+Provide a natural language response to: {query}
 """
 
-    def get_name(self) -> str:
-        """Return the agent's name."""
-        return self.name
+                response = self.llm.invoke(response_prompt)
+                final_response = response.content.strip()
 
-    def can_handle(self, world_state: WorldState) -> bool:
-        """Synthesis agent can handle when execution is complete or useful data is available."""
-        plan = world_state.context.get("plan", {})
-        completed_steps = world_state.context.get("completed_steps", [])
-        total_steps = len(plan.get("steps", []))
-
-        # Can synthesize if all steps completed OR we have weather data for weather queries
-        has_completed_all_steps = len(completed_steps) >= total_steps and total_steps > 0
-        has_empty_plan = total_steps == 0  # Empty plan indicates casual conversation
-        has_weather_data = "lastWeather" in world_state.context
-        has_location_data = bool(world_state.slots.origin or world_state.slots.destination)
-        has_errors = bool(world_state.errors)
-
-        # For weather queries, only synthesize when we have weather data
-        query = world_state.query.get("raw", "").lower()
-        is_weather_query = any(word in query for word in ["weather", "temperature", "forecast", "rain", "sunny"])
-        is_transit_query = any(word in query for word in ["from", "to", "get to", "directions", "transit", "travel"])
-        is_location_query = any(word in query for word in ["where", "location", "address", "here", "my location"])
-
-        if is_weather_query:
-            # For multi-location weather queries, check if we have weather for all planned locations
-            plan = world_state.context.get("plan", {})
-            steps = plan.get("steps", [])
-            weather_steps = [step for step in steps if step.get("action") == "Weather"]
-            completed_weather_steps = [step for step in weather_steps if step["id"] in completed_steps]
-            
-            # If we have multiple weather steps planned, wait for all of them
-            if len(weather_steps) > 1:
-                return len(completed_weather_steps) >= len(weather_steps) and not has_errors
-            else:
-                # Single location weather query - synthesize when we have weather data
-                return has_weather_data and not has_errors
-        elif is_transit_query:
-            # For transit queries, synthesize when we have geocoded locations (even without transit tool)
-            return has_location_data and not has_errors
-        elif is_location_query:
-            # For location queries, wait for ALL steps to complete (including reverse geocoding)
-            return has_completed_all_steps and not has_errors
-        else:
-            return has_completed_all_steps or has_empty_plan or (has_weather_data and not has_errors)
-
-    def process(self, world_state: WorldState) -> Dict[str, Any]:
-        """Synthesize final response from world state."""
-        if not self.llm:
-            return {"deltaState": {"errors": ["Synthesis LLM not available"]}}
-
-        try:
-            # Check for conversation response first
-            conversation_response = world_state.context.get("conversation_response", {})
-            if conversation_response.get("response_text"):
-                return {
-                    "deltaState": {
-                        "context": {
-                            "final_response": conversation_response["response_text"],
-                            "synthesis_timestamp": str(datetime.now()),
-                            "agent": self.name
+                # Log LLM usage
+                try:
+                    usage = response.usage_metadata
+                    log_llm_usage(
+                        agent=self.name,
+                        model=self.llm.model,
+                        usage={
+                            'input_tokens': usage.get('input_tokens', 0),
+                            'output_tokens': usage.get('output_tokens', 0),
+                            'total_tokens': usage.get('total_tokens', 0)
                         }
-                    },
-                    "snippet": "Conversation response synthesized"
-                }
+                    )
+                except Exception:
+                    pass
 
-            # Check if this is a multi-location weather query (more than one geocoded location)
-            geocoded_locations = world_state.context.get("geocoded_locations", {})
-            query = world_state.query.get("raw", "").lower()
-            is_weather_query = any(word in query for word in ["weather", "temperature", "forecast", "rain", "sunny"])
-            
-            # Only use multi-location synthesis if we have multiple geocoded locations
-            if is_weather_query and len(geocoded_locations) > 1:
-                # Handle multi-location weather synthesis
-                return self._synthesize_multi_location_weather(world_state, geocoded_locations)
-            
-            # Build synthesis context for single location or non-weather queries
-            query = world_state.query.get("raw", "").lower()
-            is_location_query = any(word in query for word in ["where", "location", "address", "here", "my location"])
-            is_weather_query = any(word in query for word in ["weather", "temperature", "forecast", "rain", "sunny"])
-            
-            context = {
-                "query": world_state.query.get("raw", ""),
-                "weather": world_state.context.get("lastWeather", {}),
-                "origin": world_state.slots.origin,
-                "destination": world_state.slots.destination,
-                "reverse_geocode": world_state.context.get("reverse_geocode_result", {}),
-                "errors": world_state.errors,
-                "execution_results": world_state.context.get("execution_result", {})
-            }
-            
-            # Only include accuracy information if user asked about location
-            if is_location_query:
-                context["accuracy"] = world_state.context.get("accuracy", None)
-                context["accuracy_note"] = world_state.context.get("accuracy_note", "")
-            # For weather-only queries, ensure no accuracy information is included
-            elif is_weather_query:
-                # Remove any accuracy info that might be in execution_results
-                if "execution_results" in context and isinstance(context["execution_results"], dict):
-                    execution_results = context["execution_results"].copy()
-                    if "raw" in execution_results and isinstance(execution_results["raw"], dict):
-                        raw_data = execution_results["raw"].copy()
-                        if "context" in raw_data and isinstance(raw_data["context"], dict):
-                            raw_context = raw_data["context"].copy()
-                            # Remove accuracy keys
-                            for key in ["accuracy", "accuracy_note"]:
-                                raw_context.pop(key, None)
-                            raw_data["context"] = raw_context
-                        execution_results["raw"] = raw_data
-                    context["execution_results"] = execution_results
-
-            # For weather-only queries, create a filtered world_state that doesn't include accuracy info
-            synthesis_world_state = world_state
-            if not is_location_query and is_weather_query:
-                # Create a filtered copy of world_state without accuracy information
-                filtered_context = world_state.context.copy()
-                # Remove accuracy-related keys from context
-                accuracy_keys = ["accuracy", "accuracy_note"]
-                for key in accuracy_keys:
-                    filtered_context.pop(key, None)
-                
-                # Create a new world_state-like dict with filtered context
-                synthesis_world_state = {
-                    "query": world_state.query,
-                    "slots": world_state.slots,
-                    "context": filtered_context,
-                    "errors": world_state.errors
-                }
-
-            # Generate response using LLM
-            messages = [
-                {"role": "system", "content": self.synthesis_prompt.format(world_state=synthesis_world_state)},
-                {"role": "user", "content": f"Synthesize response for: {context}"}
-            ]
-
-            response = self.llm.invoke(messages)
-            synthesized_text = response.content.strip()
-
-            return {
-                "deltaState": {
+                delta_state = {
                     "context": {
-                        "final_response": synthesized_text,
-                        "synthesis_timestamp": str(datetime.now()),
+                        "final_response": final_response,
+                        "execution_result": {
+                            "status": "success",
+                            "method": "llm_tool_selection_response_generation",
+                            "tools_executed": len(execution_results.get("tools_executed", []))
+                        },
+                        "execution_timestamp": str(datetime.utcnow()),
                         "agent": self.name
                     }
-                },
-                "snippet": "Final response synthesized"
-            }
-
-        except Exception as e:
-            logger.error(f"Synthesis failed: {e}")
-            fallback_response = self._generate_fallback_response(world_state)
-            return {
-                "deltaState": {
-                    "context": {
-                        "final_response": fallback_response
-                    },
-                    "errors": [f"Synthesis error: {str(e)}"]
                 }
-            }
 
-    def _synthesize_multi_location_weather(self, world_state: WorldState, geocoded_locations: Dict) -> Dict[str, Any]:
-        """Synthesize response for multi-location weather queries."""
+                # Merge execution results into context
+                for key, value in execution_results.get("context", {}).items():
+                    delta_state["context"][key] = value
+
+                return {
+                    "deltaState": delta_state,
+                    "snippet": f"Executed {len(execution_results.get('tools_executed', []))} tools, generated response"
+                }
+
+            except Exception as e:
+                logger.warning(f"ExecutionAgent: LLM response generation failed: {e}")
+
+        # Fallback: Generate simple response from execution results
+        logger.info("ExecutionAgent: Using fallback response generation")
+        final_response = self._generate_fallback_response(world_state, execution_results)
+
+        delta_state = {
+            "context": {
+                "final_response": final_response,
+                "execution_result": {
+                    "status": "success",
+                    "method": "fallback_response",
+                    "tools_executed": len(execution_results.get("tools_executed", []))
+                },
+                "execution_timestamp": str(datetime.utcnow()),
+                "agent": self.name
+            }
+        }
+
+        # Merge execution results
+        for key, value in execution_results.get("context", {}).items():
+            delta_state["context"][key] = value
+
+        return {
+            "deltaState": delta_state,
+            "snippet": f"Executed {len(execution_results.get('tools_executed', []))} tools with fallback response"
+        }
+
+    def _execute_plan_with_llm_reasoning(self, steps: list, world_state: WorldState, query: str) -> Dict[str, Any]:
+        """Use LLM reasoning to execute plan steps intelligently."""
+        results = {"context": {}, "slots": {}, "errors": [], "tools_executed": []}
+
+        # Prepare context for LLM reasoning
+        current_slots = world_state.slots.model_dump() if hasattr(world_state.slots, 'model_dump') else world_state.slots
+        plan_steps = [f"{step.get('action')} ({step.get('id', '')})" for step in steps]
+        plan_summary = f"Plan steps: {', '.join(plan_steps)}"
+
+        execution_prompt = f"""
+You are the Execution Agent for a transportation assistant. You need to execute the plan steps intelligently.
+
+User query: {query}
+{plan_summary}
+Current slots: {current_slots}
+
+Available tools:
+- Geolocate: Get user's current location (returns coordinates in slots.origin)
+- Geocode: Convert address to coordinates (returns coordinates in slots.origin or slots.destination)
+- ReverseGeocode: Convert coordinates to human-readable address (needs lat/lng from slots)
+- Weather: Get current weather (needs coordinates from slots)
+- Directions: Get directions between locations (handles geolocation/geocoding automatically)
+- Conversation: Handle casual conversation
+
+Guidelines:
+- Execute plan steps in logical order, respecting dependencies
+- For ReverseGeocode: Use coordinates from previous Geolocate/Geocode steps
+- For Weather: Use coordinates from slots.origin (or specify 'slot' in args for destination)
+- For Geocode: Use 'slot': 'destination' in args for second location
+- Pass results between dependent steps
+- Only execute tools that are needed and make sense given current information
+
+Analyze the plan and current state, then execute the appropriate tools.
+"""
+
+        # Ask LLM to reason step-by-step and suggest tools, then provide JSON.
+        tool_selection_prompt = execution_prompt + "\n\nPlease think step-by-step and explain which tools you would use and why. Then, provide a JSON list of tools at the end in the format: {'tools':[{'name':'ToolName','args':{...}}], 'notes': 'optional'}"
         try:
-            weather_parts = []
-            weather_results = world_state.context.get("weather_results", {})
-            
-            # Process each geocoded location
-            for step_key, location_data in geocoded_locations.items():
-                location_name = location_data.get("name", location_data.get("address", "Unknown location"))
-                
-                # Find corresponding weather data
-                # Weather steps are created immediately after geocode steps
-                # So geocode S1 -> weather S2, geocode S3 -> weather S4, etc.
-                weather_data = None
-                if step_key.startswith("step_"):
-                    # Extract the step number and add 1 to get the weather step
-                    try:
-                        step_num = int(step_key.replace("step_S", ""))
-                        weather_step_key = f"S{step_num + 1}"
-                        if weather_step_key in weather_results:
-                            weather_data = weather_results[weather_step_key].get("weather")
-                    except (ValueError, KeyError):
-                        pass
-                
-                if weather_data:
-                    temp = weather_data.get("temperature")
-                    conditions = weather_data.get("conditions")
-                    humidity = weather_data.get("humidity")
-                    wind_speed = weather_data.get("wind_speed")
-                    
-                    if temp is not None:
-                        weather_desc = f"{location_name}: {temp}°F, {conditions}"
-                        if humidity is not None:
-                            weather_desc += f", {humidity}% humidity"
-                        if wind_speed is not None:
-                            weather_desc += f", {wind_speed} mph wind"
-                        weather_parts.append(weather_desc)
-                    else:
-                        weather_parts.append(f"{location_name}: Weather data unavailable")
-                else:
-                    weather_parts.append(f"{location_name}: Weather data unavailable")
-            
-            # Create final response
-            if weather_parts:
-                response_text = "Here's the weather for the locations you asked about:\n" + "\n".join(f"• {part}" for part in weather_parts)
-            else:
-                response_text = "I'm sorry, I couldn't retrieve weather information for the requested locations."
-            
-            return {
-                "deltaState": {
-                    "context": {
-                        "final_response": response_text,
-                        "synthesis_timestamp": str(datetime.now()),
-                        "agent": self.name
-                    }
-                },
-                "snippet": "Multi-location weather response synthesized"
-            }
-            
+            reasoning_response = self.llm.invoke(tool_selection_prompt)
+            reasoning_text = str(getattr(reasoning_response, 'content', reasoning_response)).strip()
+            logger.info(f"ExecutionAgent: LLM reasoning: {reasoning_text[:500]}...")
         except Exception as e:
-            logger.error(f"Multi-location weather synthesis failed: {e}")
-            return {
-                "deltaState": {
-                    "context": {
-                        "final_response": "I'm sorry, I encountered an error while processing the weather information for multiple locations."
-                    },
-                    "errors": [f"Multi-location synthesis error: {str(e)}"]
-                }
-            }
+            logger.warning(f"ExecutionAgent: LLM reasoning invocation failed: {e}")
+            reasoning_text = ""
 
-    def _generate_fallback_response(self, world_state: WorldState) -> str:
-        """Generate fallback response when synthesis fails."""
-        query = world_state.query.get("raw", "").lower().strip()
+        # Try to extract JSON tools list if LLM provided one
+        tools_plan = None
+        try:
+            # Try to extract from ```json ... ```
+            json_match = re.search(r'```json\s*(.*?)\s*```', reasoning_text, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group(1))
+            else:
+                # Fallback to {.*}
+                json_match = re.search(r'\{.*\}', reasoning_text, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group(0))
+                else:
+                    parsed = None
+            if parsed:
+                tools_plan = parsed.get('tools') or parsed.get('tool_list') or parsed.get('actions')
+                logger.info(f"ExecutionAgent: Extracted JSON tools plan from reasoning: {tools_plan}")
+        except Exception as e:
+            logger.debug(f"ExecutionAgent: Could not parse JSON from reasoning: {e}")
 
-        # Handle casual conversation and greetings
-        casual_phrases = ["hi", "hello", "hey", "how are you", "how r u", "what's up", "sup", "good morning", "good afternoon", "good evening"]
-        if any(phrase in query for phrase in casual_phrases) or len(query.split()) <= 3:
-            return "Hello! I'm your transportation assistant. I can help you with weather conditions, location services, and navigation planning. What transportation-related question can I help you with today?"
+        # If no explicit JSON list, infer tools from free-form reasoning using keyword matching
+        if not tools_plan and reasoning_text:
+            candidate_tools = []
+            reasoning_lower = reasoning_text.lower()
+            known_actions = ["geolocate", "geocode", "reversegeocode", "reverse geocode", "weather", "directions", "conversation"]
+            for act in known_actions:
+                if act in reasoning_lower:
+                    # normalize names to canonical tool names
+                    if "reverse" in act:
+                        candidate_tools.append({"name": "ReverseGeocode", "args": {}})
+                    elif act == "geocode":
+                        candidate_tools.append({"name": "Geocode", "args": {}})
+                    elif act == "geolocate":
+                        candidate_tools.append({"name": "Geolocate", "args": {}})
+                    elif act == "weather":
+                        candidate_tools.append({"name": "Weather", "args": {}})
+                    elif act == "directions":
+                        candidate_tools.append({"name": "Directions", "args": {}})
+                    elif act == "conversation":
+                        candidate_tools.append({"name": "Conversation", "args": {}})
+            if candidate_tools:
+                tools_plan = candidate_tools
+                logger.info(f"ExecutionAgent: Inferred tools from reasoning: {tools_plan}")
 
-        # Check for reverse geocoding results first
-        reverse_geocode = world_state.context.get("reverse_geocode_result", {})
-        if reverse_geocode and any(word in query for word in ["where", "location", "address", "here"]):
-            formatted_address = reverse_geocode.get("formatted_address")
-            if formatted_address:
-                return f"You are currently located at: {formatted_address}"
+        # If tool selection succeeded, execute the selected tools
+        if tools_plan:
+            logger.info(f"ExecutionAgent: Executing selected tools: {tools_plan}")
 
-        if "weather" in query:
-            weather = world_state.context.get("lastWeather", {})
-            if weather:
-                temp = weather.get("temp", "unknown")
-                return f"The temperature is {temp}°F."
-            return "I couldn't retrieve weather information at this time."
+            # Function to substitute placeholders like {{slots.origin.lat}}
+            def substitute_placeholders(value, world_state):
+                if isinstance(value, str) and '{{' in value and '}}' in value:
+                    import re
+                    def replacer(match):
+                        path = match.group(1).strip()
+                        parts = path.split('.')
+                        obj = world_state
+                        try:
+                            for part in parts:
+                                if hasattr(obj, part):
+                                    obj = getattr(obj, part)
+                                elif isinstance(obj, dict) and part in obj:
+                                    obj = obj[part]
+                                else:
+                                    raise AttributeError(f"Cannot access {part} on {obj}")
+                            return obj
+                        except (AttributeError, KeyError, TypeError):
+                            return match.group(0)  # return original if not found
+                    return re.sub(r'\{\{([^}]+)\}\}', replacer, value)
+                return value
 
-        if world_state.errors:
-            return f"I encountered some issues: {', '.join(world_state.errors)}"
+            # helper to merge tool output into results
+            def _merge_tool_output(tool_name, out):
+                if not isinstance(out, dict):
+                    return
+                # slots
+                if out.get('slots'):
+                    try:
+                        # merge slot dicts
+                        for k, v in out.get('slots', {}).items():
+                            results['slots'][k] = v
+                    except Exception:
+                        pass
+                # context
+                if out.get('context'):
+                    try:
+                        for k, v in out.get('context', {}).items():
+                            results['context'][k] = v
+                    except Exception:
+                        pass
+                # any other top-level keys (raw, etc.) attach under context
+                for k, v in out.items():
+                    if k not in ('slots', 'context'):
+                        results['context'][f"{tool_name}_{k}"] = v
 
-        return "I'm sorry, I couldn't process your request effectively."
+            for tool in tools_plan:
+                tool_name = tool.get('name')
+                tool_args = tool.get('args', {}) or {}
+                # Substitute placeholders in args
+                tool_args = {k: substitute_placeholders(v, world_state) for k, v in tool_args.items()}
+
+                try:
+                    # Use .invoke on tools (langchain BaseTool) with a dict input
+                    if tool_name == "Geolocate":
+                        result = geolocate_user.invoke({})
+                    elif tool_name == "Geocode":
+                        result = geocode_place.invoke({"address": tool_args.get('address', tool_args.get('query', tool_args.get('location', ''))), "slot": tool_args.get('slot', 'origin')})
+                    elif tool_name == "ReverseGeocode":
+                        lat = tool_args.get('lat') or (current_slots.get('origin') or {}).get('lat')
+                        lng = tool_args.get('lng') or (current_slots.get('origin') or {}).get('lng')
+                        result = reverse_geocode.invoke({"lat": lat, "lng": lng}) if lat is not None and lng is not None else None
+                    elif tool_name == "Weather":
+                        slot = tool_args.get('slot', 'origin')
+                        lat = tool_args.get('lat') or (current_slots.get(slot) or {}).get('lat')
+                        lng = tool_args.get('lng') or (current_slots.get(slot) or {}).get('lng')
+                        units = (world_state.context.get('units') or world_state.user.get('units') or 'imperial')
+                        if lat is None or lng is None:
+                            raise ValueError("Missing coordinates for Weather tool")
+                        result = weather_current.invoke({"lat": lat, "lng": lng, "units": units})
+                        if result and 'context' in result and 'lastWeather' in result['context']:
+                            slot_used = tool_args.get('slot', 'origin')
+                            result['context'][f'lastWeather_{slot_used}'] = result['context'].pop('lastWeather')
+                    elif tool_name == "Directions":
+                        # Fill destination/origin from slots if not provided
+                        if not tool_args.get('destination'):
+                            dest_name = current_slots.get('destination', {}).get('name')
+                            if dest_name:
+                                tool_args['destination'] = dest_name
+                        if not tool_args.get('origin'):
+                            origin_name = current_slots.get('origin', {}).get('name')
+                            if origin_name:
+                                tool_args['origin'] = origin_name
+                        result = directions.invoke({"destination": tool_args.get('destination', ''), "origin": tool_args.get('origin')})
+                    elif tool_name == "Conversation":
+                        result = handle_conversation.invoke({"message": tool_args.get('message', query)})
+                    else:
+                        logger.warning(f"ExecutionAgent: Unknown tool: {tool_name}")
+                        continue
+
+                    logger.info(f"ExecutionAgent: Tool {tool_name} executed successfully: {result}")
+                    results["tools_executed"].append(tool_name)
+                    _merge_tool_output(tool_name, result)
+                    current_slots.update(results['slots'])
+
+                except Exception as e:
+                    logger.warning(f"ExecutionAgent: Error executing tool {tool_name}: {e}")
+                    results["errors"].append(f"Error executing tool {tool_name}: {e}")
+
+            return results
+
+        # Fallback: Execute plan steps one by one
+        logger.info("ExecutionAgent: Falling back to per-step execution")
+        for step in steps:
+            action = step.get("action")
+            args = step.get("args", {})
+
+            try:
+                if action == "Geolocate":
+                    result = geolocate_user.invoke({})
+                elif action == "Geocode":
+                    result = geocode_place.invoke({"address": args.get("address", args.get('query', ''))})
+                elif action == "ReverseGeocode":
+                    lat = args.get("lat") or (current_slots.get('origin') or {}).get('lat')
+                    lng = args.get("lng") or (current_slots.get('origin') or {}).get('lng')
+                    result = reverse_geocode.invoke({"lat": lat, "lng": lng}) if lat and lng else None
+                elif action == "Weather":
+                    lat = args.get("lat") or (current_slots.get('origin') or {}).get('lat')
+                    lng = args.get("lng") or (current_slots.get('origin') or {}).get('lng')
+                    units = (world_state.context.get('units') or world_state.user.get('units') or 'imperial')
+                    result = weather_current.invoke({"lat": lat, "lng": lng, "units": units}) if lat is not None and lng is not None else None
+                elif action == "Directions":
+                    result = directions.invoke({"destination": args.get("destination", ""), "origin": args.get('origin')})
+                else:
+                    logger.warning(f"ExecutionAgent: Unknown action: {action}")
+                    continue
+
+                logger.info(f"ExecutionAgent: Action {action} executed successfully: {result}")
+                results["tools_executed"].append(action)
+                # Update slots/context with the result
+                if isinstance(result, dict):
+                    # merge slots and context
+                    if result.get('slots'):
+                        try:
+                            for k, v in result.get('slots', {}).items():
+                                results['slots'][k] = v
+                        except Exception:
+                            pass
+                    if result.get('context'):
+                        try:
+                            for k, v in result.get('context', {}).items():
+                                results['context'][k] = v
+                        except Exception:
+                            pass
+                    # other keys -> context
+                    for k, v in result.items():
+                        if k not in ('slots', 'context'):
+                            results['context'][k] = v
+
+            except Exception as e:
+                logger.warning(f"ExecutionAgent: Error executing action {action}: {e}")
+                results["errors"].append(f"Error executing action {action}: {e}")
+
+        return results
+
+    def _prepare_context_summary(self, world_state: WorldState, execution_results: dict) -> dict:
+        """Produce a compact summary of world_state + execution results for LLM prompt.
+
+        Uses compact_world_state to reduce prompt size and attaches tool execution summary.
+        """
+        try:
+            compact = compact_world_state(world_state)
+        except Exception:
+            compact = {}
+
+        summary = {
+            "compact_world": compact,
+            "tools_executed": execution_results.get('tools_executed', []),
+            "errors": execution_results.get('errors', [])
+        }
+        return summary
+
+    def _generate_fallback_response(self, world_state: WorldState, execution_results: dict) -> str:
+        """Create a simple human-readable response from execution results when LLM fails."""
+        # If reverse geocode result present, prefer a direct address reply
+        ctx = execution_results.get('context', {}) or {}
+        # If we have a final_response in context already, return it
+        if ctx.get('final_response'):
+            return ctx.get('final_response')
+
+        # Check for reverse geocode
+        rg = ctx.get('reverse_geocode_result') or ctx.get('reverse_geocode')
+        if rg and isinstance(rg, dict):
+            addr = rg.get('formatted_address') or rg.get('address') or rg.get('display_name')
+            if addr:
+                return f"You are near: {addr}."
+
+        # Check slots.origin
+        origin = execution_results.get('slots', {}).get('origin') or (world_state.slots.origin if hasattr(world_state.slots, 'origin') else world_state.slots.get('origin'))
+        if origin and origin.get('name'):
+            return f"You appear to be near {origin.get('name')} (lat={origin.get('lat')}, lng={origin.get('lng')})."
+
+        # Weather result
+        lw = ctx.get('lastWeather')
+        if lw:
+            temp = lw.get('temp')
+            summary = lw.get('summary')
+            return f"Current conditions: {summary or 'unknown'}, temperature {temp if temp is not None else 'unknown'}."
+
+        # Directions or transit info
+        td = ctx.get('transit_directions') or ctx.get('directions')
+        if td and isinstance(td, dict):
+            mode = td.get('mode') or td.get('transit_directions', {}).get('mode')
+            if mode:
+                return f"I found {mode} directions for you. See details above."
+
+        # Last resort
+        errors = execution_results.get('errors', [])
+        if errors:
+            return f"I attempted to run some tools but encountered errors: {errors[0]}"
+
+        return "I couldn't determine your location. Please provide an address or allow location access."
+
+    def _prepare_context_summary(self, world_state: WorldState, execution_results: dict) -> str:
+        """Prepare a summary of execution results for LLM response generation."""
+        summaries = []
+
+        # Location info
+        origin_data = execution_results.get('slots', {}).get('origin')
+        if not origin_data and world_state.slots.origin:
+            origin_data = world_state.slots.origin.dict() if hasattr(world_state.slots.origin, 'dict') else world_state.slots.origin
+        origin = origin_data or {}
+        if origin.get('name'):
+            summaries.append(f"Origin: {origin['name']} (lat: {origin.get('lat')}, lng: {origin.get('lng')})")
+
+        dest_data = execution_results.get('slots', {}).get('destination')
+        if not dest_data and world_state.slots.destination:
+            dest_data = world_state.slots.destination.dict() if hasattr(world_state.slots.destination, 'dict') else world_state.slots.destination
+        dest = dest_data or {}
+        if dest.get('name'):
+            summaries.append(f"Destination: {dest['name']} (lat: {dest.get('lat')}, lng: {dest.get('lng')})")
+
+        # Accuracy info
+        accuracy_note = execution_results.get('context', {}).get('accuracy_note')
+        if accuracy_note:
+            summaries.append(f"Location accuracy: {accuracy_note}")
+
+        # Reverse geocode info
+        rg = execution_results.get('context', {}).get('reverse_geocode_result')
+        if rg and rg.get('formatted_address'):
+            summaries.append(f"Address: {rg['formatted_address']}")
+
+        # Weather info
+        weather_origin = execution_results.get('context', {}).get('lastWeather_origin')
+        if weather_origin:
+            temp = weather_origin.get('temp')
+            summary = weather_origin.get('summary')
+            summaries.append(f"Weather in origin: {summary or 'unknown conditions'}, {temp}°" if temp else f"Weather in origin: {summary or 'unknown'}")
+
+        weather_dest = execution_results.get('context', {}).get('lastWeather_destination')
+        if weather_dest:
+            temp = weather_dest.get('temp')
+            summary = weather_dest.get('summary')
+            summaries.append(f"Weather in destination: {summary or 'unknown conditions'}, {temp}°" if temp else f"Weather in destination: {summary or 'unknown'}")
+
+        # Directions info
+        directions_data = execution_results.get('context', {}).get('directions')
+        if directions_data and isinstance(directions_data, dict):
+            transit_dir = directions_data.get('transit_directions')
+            if transit_dir:
+                mode = transit_dir.get('mode')
+                total_duration = transit_dir.get('total_duration')
+                total_distance = transit_dir.get('total_distance')
+                summaries.append(f"Directions mode: {mode}, duration: {total_duration}, distance: {total_distance}")
+                
+                # Extract key steps
+                legs = transit_dir.get('legs', [])
+                for i, leg in enumerate(legs):
+                    if i > 0:
+                        summaries.append(f"Leg {i+1}:")
+                    steps = leg.get('steps', [])
+                    transit_steps = [step for step in steps if step.get('travel_mode') == 'TRANSIT']
+                    if transit_steps:
+                        for step in transit_steps[:3]:  # Limit to first 3 transit steps
+                            transit_info = step.get('transit', {})
+                            line = transit_info.get('line_name', 'Unknown line')
+                            vehicle = transit_info.get('vehicle_type', 'Transit')
+                            headsign = transit_info.get('headsign', '')
+                            departure = transit_info.get('departure_stop', '')
+                            arrival = transit_info.get('arrival_stop', '')
+                            dep_time = transit_info.get('departure_time', '')
+                            arr_time = transit_info.get('arrival_time', '')
+                            summaries.append(f"  Take {vehicle} {line} from {departure} to {arrival} ({dep_time} - {arr_time})")
+                    else:
+                        # If no transit, mention walking or other
+                        walking_steps = [step for step in steps if step.get('travel_mode') == 'WALKING']
+                        if walking_steps:
+                            total_walk = sum(float(step.get('duration', '0 mins').split()[0]) for step in walking_steps if 'mins' in step.get('duration', ''))
+                            summaries.append(f"  Walking: {total_walk} mins total")
+            else:
+                mode = directions_data.get('mode')
+                if mode:
+                    summaries.append(f"Directions: {mode} route available")
+
+        # Tools executed
+        tools = execution_results.get('tools_executed', [])
+        if tools:
+            summaries.append(f"Tools executed: {', '.join(tools)}")
+
+        # Errors
+        errors = execution_results.get('errors', [])
+        if errors:
+            summaries.append(f"Errors encountered: {errors[0]}")
+
+        return "\n".join(summaries) if summaries else "No specific results from tool execution."
+
+    def _generate_fallback_response(self, world_state: WorldState, execution_results: dict) -> str:
+        """Create a simple human-readable response from execution results when LLM fails."""
+        # If reverse geocode result present, prefer a direct address reply
+        ctx = execution_results.get('context', {}) or {}
+        # If we have a final_response in context already, return it
+        if ctx.get('final_response'):
+            return ctx.get('final_response')
+
+        # Check for reverse geocode
+        rg = ctx.get('reverse_geocode_result') or ctx.get('reverse_geocode')
+        if rg and isinstance(rg, dict):
+            addr = rg.get('formatted_address') or rg.get('address') or rg.get('display_name')
+            if addr:
+                return f"You are near: {addr}."
+
+        # Check slots.origin
+        origin = execution_results.get('slots', {}).get('origin') or (world_state.slots.origin if hasattr(world_state.slots, 'origin') else world_state.slots.get('origin'))
+        if origin and origin.get('name'):
+            return f"You appear to be near {origin.get('name')} (lat={origin.get('lat')}, lng={origin.get('lng')})."
+
+        # Weather result
+        lw = ctx.get('lastWeather')
+        if lw:
+            temp = lw.get('temp')
+            summary = lw.get('summary')
+            return f"Current conditions: {summary or 'unknown'}, temperature {temp if temp is not None else 'unknown'}."
+
+        # Directions or transit info
+        td = ctx.get('transit_directions') or ctx.get('directions')
+        if td and isinstance(td, dict):
+            mode = td.get('mode') or td.get('transit_directions', {}).get('mode')
+            if mode:
+                return f"I found {mode} directions for you. See details above."
+
+        # Last resort
+        errors = execution_results.get('errors', [])
+        if errors:
+            return f"I attempted to run some tools but encountered errors: {errors[0]}"
+
+        return "I couldn't determine your location. Please provide an address or allow location access."

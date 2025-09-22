@@ -1,53 +1,71 @@
-# 🏗️ Vaya - A2A Multi-Agent Architecture
+# 🏗️ Vaya Public Transport Assistant - A2A LLM Architecture (2025)
 
 ## Core Architecture
 
-### A2A (Agent-to-Agent) Pattern
-**Peer-to-peer agent communication** through shared **WorldState** blackboard pattern.
+### Two-Agent A2A (Agent-to-Agent) Pattern
 
-**Why A2A vs Traditional Orchestration:**
-- **Decentralized**: No single point of failure
-- **Scalable**: Easy to add/remove agents
-- **Resilient**: System continues if one agent fails
-- **Flexible**: Agents communicate opportunistically
+- **Planner Agent (LLM):**
+    - Receives the user query and generates a structured execution plan (JSON) with step-by-step actions and arguments.
+    - Uses a Gemini LLM (low temperature) for deterministic, structured output.
+    - Returns a plan as a deltaState patch to the shared WorldState.
 
-### Three-Agent System
+- **Execution Agent (LLM):**
+    - Receives the plan and current WorldState, reasons about dependencies, and selects which tools to execute (using LLM reasoning).
+    - Uses a Gemini LLM to decide tool invocation order, fill arguments, and handle tool chaining.
+    - Executes tools (weather, geocode, directions, etc.), merges their outputs into WorldState, and generates the final user-facing response (via LLM or fallback).
+    - Handles placeholder substitution, slot memory, and error handling.
 
-#### Planning Agent
-- **Purpose**: Creates and validates execution plans
-- **Input**: User query + current WorldState
-- **Output**: Step-by-step execution plan
-- **Replanning**: Dynamically modifies plans when execution fails
+- **WorldState (Blackboard):**
+    - Central, structured state shared by all agents.
+    - Includes user query, slots (origin/destination), context (plan, results, units, etc.), evidence, errors, and memory.
+    - All state changes are made via deltaState patches and merged with `deepMerge()`.
 
-#### Execution Agent
-- **Purpose**: Executes planned steps using tools
-- **Input**: Plan steps + WorldState
-- **Output**: API results and state updates
-- **Tools**: Weather API, Location services, Geocoding
+- **Coordinator:**
+    - Orchestrates the Planner → Executor flow.
+    - Loads/saves conversation memory to disk.
+    - Handles world state initialization, delta application, and error fallback.
 
-#### Synthesis Agent
-- **Purpose**: Generates natural language responses
-- **Input**: Execution results + conversation context
-- **Output**: Human-readable final response
-- **Features**: Multi-location synthesis, error handling
+### Data Flow
 
-### Plan & Execute Pattern
-
-#### Planning Phase
 ```
-User Query → Intent Analysis → Step Sequencing → Dependency Mapping → Error Anticipation
+User Query → Planner (LLM) → Plan JSON (deltaState) → Executor (LLM) → Tool Calls → Tool Results (deltaState) → deepMerge → Final Response
 ```
 
-#### Execution Phase
-```
-Plan → Step-by-Step Processing → Real-time Adaptation → Result Aggregation → Quality Assurance
-```
+- All agent communication is via WorldState patches.
+- No direct tool selection or response synthesis is hardcoded; LLMs drive both planning and execution.
 
-### Smart Replanning
-**Dynamic plan modification** based on runtime conditions:
+### Tooling
 
-#### Triggers
-- API failures (service unavailable)
+- Tools are implemented as LangChain `@tool` functions, returning WorldState-compatible patches.
+- Tools include: weather, geocode, geolocate, reverse geocode, directions, conversation.
+- Tools are invoked by name and arguments as determined by the Executor LLM.
+
+### Error Handling
+
+- Tools raise exceptions on API failures; agents catch and append errors to `world_state.errors[]`.
+- Executor generates fallback responses if LLM or tool execution fails.
+- All errors and tool evidence are logged for debugging.
+
+### Memory
+
+- Conversation memory is persisted in `data/conversation_memory.json` and loaded at startup.
+- WorldState context and slots can be restored between sessions.
+
+### Key Files
+
+- `main.py`: CLI entry point.
+- `agents/agents.py`: Contains both PlanningAgent and ExecutionAgent classes.
+- `agents/coordinator.py`: Manages the Planner → Executor flow and memory.
+- `agents/tools/`: Tool implementations.
+- `utils/contracts.py`: Pydantic models for WorldState, Slots, etc.
+- `utils/state.py`: State merging logic (`deepMerge`).
+
+### Notable Implementation Details
+
+- The Synthesis Agent is now merged into the Executor; the Executor LLM produces the final natural-language response.
+- The system is fully LLM-driven for both planning and tool selection.
+- All state is managed via structured patches and merged into the canonical WorldState.
+- The architecture is modular and easily extensible for new tools or agent types.
 - Ambiguous results (multiple locations)
 - Incomplete data (missing coordinates)
 - Agent signals (execution blocked)

@@ -70,18 +70,29 @@ python main.py
 
 ## 🏗️ How It Works
 
-Vaya uses a **multi-agent A2A (Agent-to-Agent)** architecture where specialized agents work together:
 
-- **Planning Agent**: Creates execution plans from user queries
-- **Execution Agent**: Calls external APIs (weather, geocoding, etc.) using small, focused tools
-- **Synthesis Agent**: Produces natural-language responses from the world state
-- **Coordinator**: Manages agent interactions, replanning, and memory
+Vaya uses a **two-agent A2A (Agent-to-Agent)** architecture powered by LLMs:
+
+- **Planning Agent (LLM):**
+	- Receives the user query and generates a structured execution plan (JSON) with step-by-step actions and arguments.
+	- Uses a Gemini LLM for deterministic, structured output.
+	- Returns a plan as a deltaState patch to the shared WorldState.
+
+- **Execution Agent (LLM):**
+	- Receives the plan and current WorldState, reasons about dependencies, and selects which tools to execute (using LLM reasoning).
+	- Uses a Gemini LLM to decide tool invocation order, fill arguments, and handle tool chaining.
+	- Executes tools (weather, geocode, directions, etc.), merges their outputs into WorldState, and generates the final user-facing response (via LLM or fallback).
+	- Handles placeholder substitution, slot memory, and error handling.
+
+- **Coordinator:**
+	- Orchestrates the Planner → Executor flow.
+	- Loads/saves conversation memory to disk.
+	- Handles world state initialization, delta application, and error fallback.
 
 ### Processing Flow
 1. User asks a question
-2. Planner makes a plan (geolocate/geocode, weather, transit)
-3. Executor runs the plan and updates WorldState
-4. Synthesizer converts the final WorldState into a user-facing message
+2. Planner (LLM) makes a plan (geolocate/geocode, weather, transit, etc.)
+3. Executor (LLM) runs the plan, calls tools, and produces the final user-facing response
 
 ## 📋 Requirements
 
@@ -128,13 +139,15 @@ pytest  # Run project tests
 
 <!-- Troubleshooting removed to keep README concise. See the project's README or docs for troubleshooting tips. -->
 
+
 ## 📊 Architecture (For Developers)
 
 Vaya's architecture centers on a shared WorldState (blackboard) updated by agents. Tools return deltaState patches and `deepMerge()` is used to apply them.
 
 ```
-User Query → Coordinator → Planning Agent → Execution Agent → Synthesis Agent → Response
+User Query → Coordinator → Planning Agent (LLM) → Execution Agent (LLM) → Tools → WorldState (deepMerge) → Response
 ```
+
 
 ### Tech Stack
 - Python, LangChain, Google Gemini (LLM), Google Cloud APIs (geocoding, weather)

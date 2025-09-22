@@ -18,8 +18,8 @@ except ImportError:
     print("python-dotenv not installed. Install with: pip install python-dotenv")
     print("Or set environment variables manually.")
 
-# Add the project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add the project root to path (parent of tests directory)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.tools.location_tool import geolocate_user, geocode_place
 from agents.tools.weather_tool import weather_current
@@ -75,13 +75,21 @@ def test_geocode():
         print(f"❌ Geocode error: {e}")
         return None
 
-def test_weather(location):
+def test_weather():
     """Test the weather_current tool."""
-    if not location or not location.get("lat") or not location.get("lng"):
-        print("\n❌ Cannot test weather - no location available")
-        return
+    # Use a hardcoded location for testing
+    location = {"lat": 40.7128, "lng": -74.0060, "name": "New York, NY"}
     
     print(f"\nTesting Weather for {location.get('name', 'location')}...")
+    try:
+        result = weather_current.invoke({"lat": location["lat"], "lng": location["lng"], "units": "imperial"})
+        print(f"Weather Result: {result}")
+        if isinstance(result, dict) and result.get("context", {}).get("lastWeather"):
+            print("✅ Weather successful - got weather data")
+        else:
+            print("❌ Weather failed - no weather data returned")
+    except Exception as e:
+        print(f"❌ Weather error: {e}")
     try:
         result = weather_current.invoke({"lat": location["lat"], "lng": location["lng"], "units": "imperial"})
         print(f"Weather Result: {result}")

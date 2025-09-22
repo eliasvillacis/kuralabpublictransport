@@ -1,8 +1,9 @@
 """
 A2A-enabled CLI entry for the Vaya transportation assistant.
 
-This version uses the A2A (Agent-to-Agent) coordinator for true peer-to-peer
-agent communication, with replanning capabilities and persistent memory.
+This version uses the simplified two-agent A2A coordinator:
+- Planner: Creates structured execution plans
+- Executor: Executes plans and generates final responses
 """
 
 from dotenv import load_dotenv
@@ -14,7 +15,6 @@ load_dotenv(dotenv_path=dotenv_path)
 
 from utils.logger import get_logger
 from agents.coordinator import get_coordinator
-from agents.agents import PlanningAgent, ExecutionAgent, SynthesisAgent
 
 # Set up logger
 logger = get_logger(__name__)
@@ -32,15 +32,9 @@ except ImportError:
     COLORS_AVAILABLE = False
 
 def initialize_a2a_system():
-    """Initialize the A2A coordinator with all agents."""
+    """Initialize the two-agent A2A coordinator."""
     coordinator = get_coordinator()
-
-    # Register agents
-    coordinator.register_agent(PlanningAgent())
-    coordinator.register_agent(ExecutionAgent())
-    coordinator.register_agent(SynthesisAgent())
-
-    logger.info("A2A system initialized with agents: planner, executor, synthesizer")
+    logger.info("Two-agent A2A system initialized: Planner → Executor")
     return coordinator
 
 def print_welcome():
@@ -48,21 +42,21 @@ def print_welcome():
     Print a welcoming startup message with color and usage tips.
     """
     print(f"\n{Fore.CYAN}{'='*60}")
-    print(f"{Fore.YELLOW}🤖 VAYA A2A TRANSPORTATION ASSISTANT")
+    print(f"{Fore.YELLOW}🤖 VAYA TWO-AGENT TRANSPORTATION ASSISTANT")
     print(f"{Fore.CYAN}{'='*60}")
-    print(f"{Fore.WHITE}Your AI-powered companion with A2A multi-agent architecture!")
+    print(f"{Fore.WHITE}Powered by Planner → Executor A2A Architecture!")
     print(f"\n{Fore.GREEN}✨ Enhanced Features:")
-    print(f"{Fore.WHITE}   🔄 Dynamic replanning based on execution results")
-    print(f"{Fore.WHITE}   🧠 Persistent conversation memory")
-    print(f"{Fore.WHITE}   🤝 True agent-to-agent communication")
-    print(f"{Fore.WHITE}   📊 Real-time state sharing")
+    print(f"{Fore.WHITE}   🧠 Intelligent planning and execution")
+    print(f"{Fore.WHITE}   🚀 Direct tool integration")
+    print(f"{Fore.WHITE}   📊 Real-time state management")
+    print(f"{Fore.WHITE}   � Persistent conversation memory")
     print(f"\n{Fore.GREEN}💬 I can help you with:")
     print(f"{Fore.WHITE}   🌤️  Weather conditions and forecasts")
     print(f"{Fore.WHITE}   🚗 Traffic and route information")
     print(f"{Fore.WHITE}   🚌 Public transit schedules")
     print(f"{Fore.WHITE}   📍 Location-based services")
     print(f"\n{Fore.MAGENTA}💡 Commands: {Fore.WHITE}'exit' or 'quit' to end, 'reset' to clear memory")
-    print(f"{Fore.WHITE}   'memory' to view conversation history, 'status' for system info")
+    print(f"{Fore.WHITE}   'status' for system information")
     print(f"{Fore.CYAN}{'-'*60}\n")
 
 def print_goodbye():
@@ -79,18 +73,14 @@ def handle_special_commands(user_input: str, coordinator) -> Optional[str]:
     command = user_input.lower().strip()
 
     if command == "memory":
-        context = coordinator.get_memory_context()
         print(f"\n{Fore.BLUE}📚 Conversation Memory:")
-        print(f"{Fore.WHITE}Recent messages: {len(context.get('recent_messages', []))}")
-        print(f"Agent interactions: {len(context.get('agent_interactions', []))}")
-        print(f"World state snapshots: {len(context.get('world_state_history', []))}")
+        print(f"{Fore.WHITE}Memory is managed automatically by the two-agent system")
         return None
 
     elif command == "status":
         print(f"\n{Fore.BLUE}🔧 System Status:")
-        print(f"{Fore.WHITE}Active agents: {list(coordinator.agents.keys())}")
-        print(f"Memory file: data/conversation_memory.json")
-        print(f"Replanning: {'Enabled' if coordinator.replanning_enabled else 'Disabled'}")
+        print(f"{Fore.WHITE}Architecture: Two-agent A2A (Planner → Executor)")
+        print(f"{Fore.WHITE}Memory file: data/conversation_memory.json")
         return None
 
     elif command == "reset":
@@ -132,16 +122,10 @@ def main():
 
             try:
                 # Process through A2A coordinator
-                print(f"{Fore.MAGENTA}🔄 Processing through A2A agents...")
+                print(f"{Fore.MAGENTA}🔄 Processing through two-agent A2A system...")
                 assistant_response = coordinator.process_user_query(processed_input)
 
                 print(f"{Fore.GREEN}🤖 Assistant: {Fore.WHITE}{assistant_response}\n")
-
-                # Show agent activity summary
-                context = coordinator.get_memory_context()
-                recent_interactions = context.get('agent_interactions', [])
-                if recent_interactions:
-                    print(f"{Fore.CYAN}📊 Agent Activity: {len(recent_interactions)} interactions in this turn\n")
 
             except Exception as e:
                 logger.error(f"Error in A2A processing: {e}")
