@@ -3,6 +3,7 @@ from langchain_core.tools import tool
 from langchain_core.language_models import BaseLanguageModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 import os
+from utils.llm_logger import log_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,21 @@ Response:"""
 
             llm_response = llm.invoke([{"role": "user", "content": prompt}])
             response_text = llm_response.content.strip()
+
+            # Log LLM token usage
+            try:
+                usage = llm_response.usage_metadata
+                log_llm_usage(
+                    agent="conversation_tool",
+                    model=llm.model,
+                    usage={
+                        'input_tokens': usage['input_tokens'],
+                        'output_tokens': usage['output_tokens'],
+                        'total_tokens': usage['total_tokens']
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"Failed to log LLM usage for conversation_tool: {e}")
 
             return {
                 "context": {

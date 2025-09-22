@@ -1,20 +1,22 @@
 import os
 import logging
 import requests
+import time
 from typing import Optional
 from langchain_core.tools import tool
-from langchain_core.language_models import BaseLanguageModel
+from utils.api_logger import log_api_call
 
 logger = logging.getLogger(__name__)
 
 # Geocode tool: address or place name to lat/lng
 @tool("Geocode")
-def geocode_place(address: Optional[str] = None, cityHint: Optional[str] = None) -> dict:
+def geocode_place(address: Optional[str] = None, cityHint: Optional[str] = None, slot: str = 'origin') -> dict:
     """Return a dict with 'lat', 'lng' and 'formatted_address'.
 
     Args:
         address: free-text address or place name. If None, 'cityHint' will be used if provided.
         cityHint: optional city hint to disambiguate.
+        slot: which slot to populate ('origin' or 'destination')
     """
     logger.info(f"Geocode tool called with address={address}, cityHint={cityHint}")
     api_key = os.environ.get("GOOGLE_API_KEY")
@@ -40,12 +42,31 @@ def geocode_place(address: Optional[str] = None, cityHint: Optional[str] = None)
             params = {"address": query, "key": api_key}
             logger.debug(f"Making direct geocoding API call to: {url}")
             logger.debug(f"API Parameters: {params}")
+            start = time.time()
             r = requests.get(url, params=params, timeout=20)
+            elapsed_ms = int((time.time() - start) * 1000)
+            try:
+                response_bytes = len(r.content) if r.content is not None else None
+            except Exception:
+                response_bytes = None
             logger.debug(f"Geocoding API Response Status: {r.status_code}")
             logger.debug(f"Geocoding API Response: {r.text[:500]}...")
             r.raise_for_status()
             res = r.json().get("results", [])
             logger.debug(f"Parsed {len(res)} geocoding results")
+            try:
+                log_api_call(
+                    tool_name="location_tool_geocode",
+                    provider="google",
+                    endpoint="geocode/json",
+                    status=r.status_code,
+                    elapsed_ms=elapsed_ms,
+                    response_bytes=response_bytes,
+                    params={"address": query},
+                    estimated_cost=None,
+                )
+            except Exception:
+                logger.debug("api_logger.log_api_call failed but continuing")
 
         if not res:
             raise ValueError(f"No geocoding results found for: {query}")
@@ -58,7 +79,7 @@ def geocode_place(address: Optional[str] = None, cityHint: Optional[str] = None)
         # Return a WorldState-compatible patch
         return {
             "slots": {
-                "origin": {
+                slot: {
                     "lat": lat,
                     "lng": lng,
                     "name": formatted_address or query
@@ -84,12 +105,31 @@ def geolocate_user() -> dict:
     try:
         # For CLI, we don't have wifi/cell data, so send an empty POST body (Google will use IP fallback)
         logger.debug("Sending empty POST body for IP-based geolocation")
+        start = time.time()
         r = requests.post(url, json={}, timeout=15)
+        elapsed_ms = int((time.time() - start) * 1000)
         logger.debug(f"Geolocation API Response Status: {r.status_code}")
         logger.debug(f"Geolocation API Response: {r.text}")
         r.raise_for_status()
         data = r.json()
         logger.debug(f"Parsed geolocation response: {data}")
+        try:
+            response_bytes = len(r.content) if r.content is not None else None
+        except Exception:
+            response_bytes = None
+        try:
+            log_api_call(
+                tool_name="location_tool_geolocate",
+                provider="google",
+                endpoint="geolocate",
+                status=r.status_code,
+                elapsed_ms=elapsed_ms,
+                response_bytes=response_bytes,
+                params=None,
+                estimated_cost=None,
+            )
+        except Exception:
+            logger.debug("api_logger.log_api_call failed but continuing")
         loc = data.get("location", {})
         lat = loc.get("lat")
         lng = loc.get("lng")
@@ -147,12 +187,31 @@ def reverse_geocode(lat: float, lng: float) -> dict:
             }
             logger.debug(f"Making direct reverse geocoding API call to: {url}")
             logger.debug(f"API Parameters: {params}")
+            start = time.time()
             r = requests.get(url, params=params, timeout=20)
+            elapsed_ms = int((time.time() - start) * 1000)
+            try:
+                response_bytes = len(r.content) if r.content is not None else None
+            except Exception:
+                response_bytes = None
             logger.debug(f"Reverse geocoding API Response Status: {r.status_code}")
             logger.debug(f"Reverse geocoding API Response: {r.text[:500]}...")
             r.raise_for_status()
             res = r.json().get("results", [])
             logger.debug(f"Parsed {len(res)} reverse geocoding results")
+            try:
+                log_api_call(
+                    tool_name="location_tool_reverse_geocode",
+                    provider="google",
+                    endpoint="geocode/json",
+                    status=r.status_code,
+                    elapsed_ms=elapsed_ms,
+                    response_bytes=response_bytes,
+                    params={"latlng": f"{lat},{lng}"},
+                    estimated_cost=None,
+                )
+            except Exception:
+                logger.debug("api_logger.log_api_call failed but continuing")
 
         if not res:
             raise ValueError(f"No reverse geocoding results found for coordinates: {lat}, {lng}")

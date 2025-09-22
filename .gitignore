@@ -56,18 +56,12 @@ ENV/
 ehthumbs.db
 Thumbs.db
 
+
 # Logs and data
 logs/
 *.log
-data/*.db
-data/*.sqlite
-data/*.sqlite3
-data/conversation_memory.json
-data/*.json
-data/cache/
-data/temp/
-data/sessions/
-data/uploads/
+data/*
+!data/.gitkeep
 
 # Testing
 .coverage

@@ -1,8 +1,10 @@
 import os
 import logging
 import requests
+import time
 from langchain_core.tools import tool
-from langchain_core.language_models import BaseLanguageModel
+from utils.api_logger import log_api_call
+
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +32,38 @@ def get_current_weather(lat: float, lng: float, units: str = "IMPERIAL") -> dict
     logger.debug(f"API URL: {url}")
     logger.debug(f"API Headers: {headers}")
     
+    start = time.time()
     r = requests.get(url, headers=headers, timeout=20)
+    elapsed_ms = int((time.time() - start) * 1000)
+    try:
+        response_bytes = len(r.content) if r.content is not None else None
+    except Exception:
+        response_bytes = None
+
     logger.debug(f"API Response Status: {r.status_code}")
     logger.debug(f"API Response Headers: {dict(r.headers)}")
     logger.debug(f"API Response Body: {r.text[:500]}...")  # First 500 chars
-    
+
+    # Ensure we raise for HTTP errors first
     r.raise_for_status()
     response_data = r.json()
     logger.debug(f"Parsed API Response: {response_data}")
+
+    # Best-effort API call logging. Do not let logging failures break the tool.
+    try:
+        log_api_call(
+            tool_name="weather_tool",
+            provider="google",
+            endpoint="currentConditions:lookup",
+            status=r.status_code,
+            elapsed_ms=elapsed_ms,
+            response_bytes=response_bytes,
+            params={"lat": lat, "lng": lng, "units": units},
+            estimated_cost=None,
+        )
+    except Exception:
+        logger.debug("api_logger.log_api_call failed but continuing")
+
     return response_data
 
 @tool("Weather")

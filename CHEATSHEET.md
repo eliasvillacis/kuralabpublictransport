@@ -1,404 +1,208 @@
-# Understanding the Vaya Transportation Assistant
 
-## What This Project Is About
+# Vaya Public Transport Assistant — Quick Reference Cheat Sheet
 
-This is a transportation assistant that uses multiple AI systems working together to help people with travel questions. It's built using a special architecture called "Agent-to-Agent" (A2A) where different AI programs communicate through a shared information space to solve problems.
+## 🚦 System Overview
 
-## The Main Idea: How Multiple AIs Work Together
+This project is a multi-agent, LLM-driven public transport assistant. It uses a two-agent (A2A) architecture:
 
-Instead of having one big AI that tries to do everything, this project uses three specialized AI programs that each have their own job. They communicate with each other using a shared "blackboard" (called WorldState) where they write down what they've learned and what needs to be done next.
+- **Planner (LLM):** Interprets user intent and emits a structured plan (JSON steps)
+- **Executor (LLM + tools):** Runs the plan, calls tools, and produces the final user-facing response
 
-Here's how it works:
-1. **User asks a question** → "What's the weather in Miami?"
-2. **Planning AI** figures out what steps are needed
-3. **Action AI** does the actual work (calls weather APIs, finds locations)
-4. **Chat AI** takes all the information and gives a nice answer
+Agents communicate only via a shared `WorldState` (blackboard pattern). All state changes are made by merging deltaState patches using `deepMerge()`.
 
-## Current Architecture: Single-Threaded Multi-Agent System
+---
 
-**Important Clarification:** While this is technically a multi-agent system with three distinct agents, the current implementation is **sequential** (not parallel). The agents work one after another, not simultaneously. Here's why:
+## 🧠 Agent Roles
 
-### Why Sequential Execution?
-- **Simple and reliable**: Easier to debug and understand
-- **State consistency**: No race conditions between agents
-- **Resource efficiency**: Uses less memory and API calls
-- **Predictable behavior**: Each step completes before the next begins
+### 1. Planner (LLM)
+- Reads user query from `WorldState`
+- Emits a structured plan (JSON: steps array with id, action, args)
+- Prefers transit directions for routing, requests geocoding/geolocation as needed
+- Includes fallbacks (e.g., walking) if transit is unavailable
 
-### Future Possibilities for Parallel Execution
-The architecture *could* be extended to support parallel processing:
-- **Independent API calls**: Weather for multiple cities could run simultaneously
-- **Async execution**: Using Python's `asyncio` for concurrent operations
-- **Multiple executors**: Specialized executors for different types of tasks
+### 2. Executor (LLM + tools)
+- Reads the plan from `WorldState`
+- Runs each step by calling the appropriate tool (weather, directions, geocode, etc.)
+- Merges tool results into `WorldState` as deltaState patches
+- Produces the final assistant-facing response (`final_response` in `deltaState.context`)
+- Handles tool errors gracefully, provides fallback answers
 
-## Agent-to-Agent (A2A) Communication: Yes, It's Still A2A!
+---
 
-**Yes, this is absolutely still A2A architecture**, even with a shared WorldState. Here's why:
+## 🗂️ Key Files & Folders
 
-### What Makes It A2A?
-1. **Decentralized decision-making**: Each agent makes its own decisions based on the current state
-2. **Peer communication**: Agents communicate through the shared WorldState (the "blackboard pattern")
-3. **Autonomous operation**: Each agent can operate independently once it has the information it needs
-4. **Dynamic coordination**: Agents can respond to changes in the WorldState made by other agents
+**/agents/**
+- `agents.py` — Planner and Executor agent classes
+- `coordinator.py` — Orchestrates Planner → Executor flow, manages memory and state
+- `/tools/` — Modular tool implementations:
+  - `weather_tool.py` — Weather via Google API
+  - `directions_tool.py` — Transit/walking directions
+  - `location_tool.py` — Geocoding/geolocation
+  - `conversation_tool.py` — Small talk, fallback
 
-### WorldState as Communication Medium
-The WorldState acts like a shared bulletin board:
-- **Planning Agent** writes: "Here's the plan - execute these steps"
-- **Execution Agent** reads the plan and writes: "Step 1 completed, results here"
-- **Synthesis Agent** reads the results and writes: "Final response ready"
-- **Coordinator** monitors the board and manages the overall process
+**/utils/**
+- `contracts.py` — Pydantic models for `WorldState`, `Slots`, etc.
+- `state.py` — `deepMerge()` for patching state
+- `logger.py` — Logging to `logs/app.log` and console
 
-This is actually a **classic A2A pattern** used in many multi-agent systems!
+**/data/**
+- `conversation_memory.json` — Persistent conversation memory
 
-## The Three Main AI Programs (Agents)
+**/logs/**
+- `app.log` — System and error logs
 
-### 1. The Planning Agent (`agents/agents.py` - PlanningAgent class)
+**Root**
+- `main.py` — CLI entry point
+- `requirements.txt` — Python dependencies
+- `README.md` — Project documentation
 
-**What it does:** This is like the project manager of the team. It reads what the user wants and creates a step-by-step plan.
+---
 
-**How it works:**
-- Gets the user's question from the WorldState
-- Uses simple rules to decide what needs to be done:
-  - If user says "weather", it plans to get location and weather data
-  - If user says "where am I", it plans to get current location
-  - If user just says "hi", it plans to use the conversation tool
-- Creates a plan as a list of steps (like "Step 1: Find location", "Step 2: Get weather")
-- If something goes wrong, it can change the plan
+## 🔄 Data Flow (A2A)
 
-**Key code parts:**
-```python
-# This checks if the user is just chatting
-casual_phrases = ["hi", "hello", "hey", "how are you", "what's up"]
-is_casual = any(phrase in query_text for phrase in casual_phrases)
-if is_casual:
-    # Create a simple plan with just the conversation tool
-    plan = {"steps": [{"id": "S1", "action": "Conversation", "args": {"message": query}}]}
+1. **User Input** → `main.py` (CLI)
+2. **Coordinator** → Creates initial `WorldState`, starts Planner
+3. **Planner** → Emits plan (JSON steps)
+4. **Executor** → Runs steps, calls tools, merges results
+5. **Output** → Final response returned to user
+
+All state changes are via deltaState patches merged with `deepMerge()`.
+
+---
+
+## 🛠️ Tool Pattern
+
+- Tools are simple Python functions (decorated with `@tool("ToolName")`)
+- Each tool returns a WorldState-compatible patch (not raw API data)
+- Example:
+  ```python
+  @tool("Weather")
+  def weather_current(lat: float, lng: float, units: str = "IMPERIAL") -> dict:
+      api_data = call_external_api(lat, lng, units)
+      return {
+          "context": {
+              "lastWeather": {
+                  "lat": lat,
+                  "lng": lng,
+                  "units": units,
+                  "data": api_data
+              }
+          }
+      }
+  ```
+- Tool results are merged into `WorldState` by the Executor
+
+---
+
+## 🧩 State Management
+
+- All state is managed via `WorldState` (see `utils/contracts.py`)
+- Agents/tools **never** mutate state directly; they return deltaState patches
+- Use `deepMerge()` (in `utils/state.py`) to apply patches
+- All state changes are validated by Pydantic models
+
+---
+
+## 🚨 Error Handling
+
+- Tools raise exceptions on API failures; Executor catches and appends errors to `world_state.errors[]`
+- Executor provides fallback answers (e.g., walking if transit fails)
+- All errors and tool evidence are logged in `logs/app.log`
+
+---
+
+## 🧪 Testing & Debugging
+
+### Unit Testing
+- Mock LLMs and tools for deterministic results
+- Test tool returns (WorldState patches)
+- Validate agent logic with controlled state
+
+### Integration Testing
+- Test full Planner → Executor → tool flow
+- Use `pytest` (see `tests/`)
+
+### Debugging
+- Check `logs/app.log` for errors
+- Dump `WorldState` after each step to trace merges
+- Tool evidence is stored in `context.<tool>_evidence` for auditing
+
+---
+
+## 🚀 Onboarding & Setup
+
+### 1. Install dependencies
+```bash
+pip install -r requirements.txt
 ```
 
-### 2. The Execution Agent (`agents/agents.py` - ExecutionAgent class)
-
-**What it does:** This is the worker bee that actually gets things done. It takes the plan from the Planning Agent and executes it step by step.
-
-**Current Implementation:** Sequential execution (one step at a time)
-- Gets the plan from the Planning Agent
-- For each step in the plan, it calls the right tool:
-  - "Geolocate" → calls Google Maps to find current location
-  - "Geocode" → calls Google Maps to find a specific place
-  - "Weather" → calls Google Weather API
-  - "Conversation" → uses the conversation tool for casual talk
-- Each tool returns data that gets stored in the WorldState
-- Moves to the next step only after the current one completes
-
-**Why sequential?** It ensures reliability and makes debugging easier. Each step must complete successfully before the next begins.
-
-### 1. The Planning Agent (`agents/agents.py` - PlanningAgent class)
-
-**What it does:** This is like the project manager of the team. It reads what the user wants and creates a step-by-step plan.
-
-**How it works:**
-- Gets the user's question from the WorldState
-- Uses simple rules to decide what needs to be done:
-  - If user says "weather", it plans to get location and weather data
-  - If user says "where am I", it plans to get current location
-  - If user just says "hi", it plans to use the conversation tool
-- Creates a plan as a list of steps (like "Step 1: Find location", "Step 2: Get weather")
-- If something goes wrong, it can change the plan
-
-**Key code parts:**
-```python
-# This checks if the user is just chatting
-casual_phrases = ["hi", "hello", "hey", "how are you", "what's up"]
-is_casual = any(phrase in query_text for phrase in casual_phrases)
-if is_casual:
-    # Create a simple plan with just the conversation tool
-    plan = {"steps": [{"id": "S1", "action": "Conversation", "args": {"message": query}}]}
+### 2. Set up API keys
+Create a `.env` file in the project root:
+```
+GEMINI_API_KEY=your_gemini_key_here
+GOOGLE_API_KEY=your_google_key_here
 ```
 
-### 2. The Execution Agent (`agents/agents.py` - ExecutionAgent class)
-
-**What it does:** This is the worker bee that actually gets things done. It takes the plan from the Planning Agent and makes it happen.
-
-**How it works:**
-- Gets the plan from the Planning Agent
-- For each step in the plan, it calls the right tool:
-  - "Geolocate" → calls Google Maps to find current location
-  - "Geocode" → calls Google Maps to find a specific place
-  - "Weather" → calls Google Weather API
-  - "Conversation" → uses the conversation tool for casual talk
-- Each tool returns data that gets stored in the WorldState
-- If a step fails, it records the error
-
-**Key code parts:**
-```python
-# This is how it decides which tool to use
-if action == "Geolocate":
-    return self._execute_geolocate()
-elif action == "Weather":
-    return self._execute_weather(args, world_state)
-elif action == "Conversation":
-    return self._execute_conversation(args.get("message", ""))
+### 3. Run the CLI
+```bash
+python -m main
 ```
 
-### 3. The Synthesis Agent (`agents/agents.py` - SynthesisAgent class)
+### 4. Try example queries
+- Weather: `What's the weather in Miami?`
+- Directions: `How do I get from Miami to Orlando by transit?`
+- Location: `Where am I?`
+- Multi-step: `What's the weather in Miami and New York?`
 
-**What it does:** This is the friendly explainer that takes all the raw data and turns it into a nice, helpful answer for the user.
+---
 
-**How it works:**
-- Waits until all the work is done (all steps completed)
-- Looks at all the data collected (weather info, locations, conversation responses)
-- Uses either simple rules or an AI language model to create a response
-- For weather: "It's 75°F and sunny in Miami"
-- For conversation: "Hello! I'm here to help with transportation questions"
+## 🏗️ Common Dev Tasks
 
-**Key code parts:**
-```python
-# Check if we have conversation data ready to use
-conversation_response = world_state.context.get("conversation_response", {})
-if conversation_response.get("response_text"):
-    return {
-        "deltaState": {
-            "context": {
-                "final_response": conversation_response["response_text"]
-            }
-        }
-    }
-```
+### Add a New Tool
+1. Create a new file in `agents/tools/`
+2. Use `@tool("ToolName")` decorator
+3. Return a WorldState-compatible patch
+4. Register tool in Executor's action handling
+5. Update Planner logic if needed
 
-## How The Agents Talk To Each Other
+### Debugging
+1. Check `logs/app.log` for errors
+2. Inspect `WorldState` after each step
+3. Test tools directly with mock inputs
 
-The agents don't talk directly to each other. Instead, they all read from and write to the same "WorldState" object. It's like a shared notebook where:
+### Testing
+- Run all tests: `pytest -q`
+- See `tests/` for examples
 
-- **Planning Agent writes:** "Here's the plan - do these 3 steps"
-- **Execution Agent reads:** "Okay, I see the plan, let me do step 1"
-- **Execution Agent writes:** "Step 1 is done, here's the weather data"
-- **Synthesis Agent reads:** "I see all steps are done and we have weather data"
-- **Synthesis Agent writes:** "Here's the final answer for the user"
+---
 
-## Addressing Architecture Questions
+## 🧭 Design Principles
 
-### Is It Really Multi-Agent With Only One Executor?
+- **Separation of concerns:** Planner plans, Executor executes, tools act
+- **LLM-driven:** Both Planner and Executor are LLMs (Gemini via LangChain)
+- **A2A via shared state:** All agent communication is through `WorldState`
+- **Tool-based:** All real work is done by modular tools
+- **Error resilience:** System continues even if some tools fail
+- **Memory persistence:** Conversation memory is saved in `/data/`
 
-**Yes, it is still a multi-agent system**, but with a **centralized execution model**. Here's the breakdown:
+---
 
-**Current Agent Count:**
-- **1 Planning Agent** - Creates and manages plans
-- **1 Execution Agent** - Executes all the actual work
-- **1 Synthesis Agent** - Creates final responses
-- **1 Coordinator** - Manages the overall process
+## 📝 Special CLI Commands
 
-**Why This Design?**
-1. **Simplicity**: One executor is easier to manage and debug
-2. **Consistency**: All execution goes through the same logic and error handling
-3. **Resource Efficiency**: Less overhead than multiple executors
-4. **State Management**: Single executor means no coordination issues between multiple workers
+- `/status` — Show current system state
+- `/memory` — Show conversation memory
+- `/reset` — Reset conversation and state
 
-### Why Sequential Execution (Not Parallel)?
+---
 
-**Current Implementation:** The Execution Agent processes steps one at a time:
-```python
-# In agents/agents.py - ExecutionAgent.process()
-for step in steps:
-    if step["id"] not in completed:
-        result = execute_step(step)
-        # Only move to next step after this one completes
-```
+## 📚 References
 
-**Why Sequential?**
-1. **API Rate Limits**: Many APIs have request limits that parallel calls would exceed
-2. **Error Handling**: Easier to handle failures when steps are isolated
-3. **State Consistency**: No race conditions between concurrent operations
-4. **Debugging**: Clear execution order makes problems easier to trace
+- See `ARCHITECTURE.md` for deep-dive
+- See `README.md` for onboarding
 
-**When Parallel Could Help:**
-- **Independent operations**: Getting weather for multiple cities simultaneously
-- **Different APIs**: Calling Google Maps and Weather APIs at the same time
-- **Batch processing**: Multiple similar requests that don't depend on each other
+---
 
-**How Parallel Could Work:**
-```python
-# Future implementation possibility
-async def execute_parallel(steps):
-    tasks = []
-    for step in steps:
-        if is_independent(step):  # Check if step can run in parallel
-            tasks.append(asyncio.create_task(execute_step_async(step)))
-    
-    results = await asyncio.gather(*tasks)
-    return results
-```
-
-### Is WorldState Still "Agent-to-Agent" Communication?
-
-**Absolutely yes!** The WorldState is actually the **classic implementation** of A2A communication:
-
-**Traditional A2A:** Agents send direct messages to each other
-**WorldState A2A:** Agents read/write to a shared information space
-
-**Why WorldState is Still A2A:**
-1. **Decentralized Control**: Each agent makes its own decisions
-2. **Autonomous Operation**: Agents work independently based on available information
-3. **Dynamic Coordination**: Agents respond to changes made by others
-4. **Shared Understanding**: All agents have access to the same information
-
-**Real-World Analogy:**
-- **Traditional A2A**: Like teammates passing notes in class
-- **WorldState A2A**: Like writing on a shared whiteboard that everyone can read
-
-This pattern is used in many production multi-agent systems because it:
-- Scales better than direct messaging
-- Provides natural load balancing
-- Makes the system more resilient to individual agent failures
-
-## The Tools That Do The Real Work
-
-### Location Tools (`agents/tools/location_tool.py`)
-
-**Geolocate Tool:** Uses Google Maps to find where the user is right now
-```python
-@tool("Geolocate")
-def geolocate_user() -> dict:
-    # Calls Google's geolocation API
-    # Returns: {"slots": {"origin": {"lat": 25.7617, "lng": -80.1918, "name": "Miami, FL"}}}
-```
-
-**Geocode Tool:** Finds the coordinates of a place name
-```python
-@tool("Geocode")
-def geocode_place(address: str) -> dict:
-    # Calls Google Maps geocoding API
-    # Input: "Miami, FL"
-    # Returns: {"slots": {"origin": {"lat": 25.7617, "lng": -80.1918, "name": "Miami, FL"}}}
-```
-
-### Weather Tool (`agents/tools/weather_tool.py`)
-
-**Weather Tool:** Gets current weather for any location
-```python
-@tool("Weather")
-def weather_current(lat: float, lng: float, units: str = "IMPERIAL") -> dict:
-    # Calls Google Weather API
-    # Input: lat=25.7617, lng=-80.1918
-    # Returns: {"context": {"lastWeather": {"temp": 75, "summary": "sunny", "humidity": 60}}}
-```
-
-### Conversation Tool (`agents/tools/conversation_tool.py`)
-
-**Conversation Tool:** Handles casual talk and redirects to transportation
-```python
-@tool("Conversation")
-def handle_conversation(message: str) -> dict:
-    # Input: "hi how are you"
-    # Returns: {"context": {"conversation_response": {"response_text": "Hello! I'm your transportation assistant..."}}}
-```
-
-## The Main Program That Starts Everything
-
-### `main.py` - The Entry Point
-
-This is the first file that runs when you type `python main.py`. It:
-
-1. **Sets up the system:**
-   - Loads environment variables (API keys)
-   - Creates the three agents
-   - Sets up the coordinator that manages them
-
-2. **Runs the chat loop:**
-   - Shows the welcome message
-   - Waits for user input
-   - Sends questions to the A2A system
-   - Shows the responses
-
-3. **Handles special commands:**
-   - "exit" or "quit" → ends the program
-   - "reset" → clears memory
-   - "memory" → shows conversation history
-
-### `agents/coordinator.py` - The Traffic Controller
-
-This file manages the three agents and makes sure they work together properly:
-
-- **Starts the conversation process** when user asks a question
-- **Tells agents when to work** (planning → execution → synthesis)
-- **Handles replanning** if something goes wrong
-- **Manages memory** of the conversation
-- **Coordinates the message passing** between agents
-
-## How A Conversation Actually Works
-
-Let's trace through what happens when user says "What's the weather in Miami?":
-
-1. **User Input** → `main.py` gets "What's the weather in Miami?"
-
-2. **Coordinator Starts** → `coordinator.py` creates WorldState with the question
-
-3. **Planning Phase:**
-   - PlanningAgent reads: "What's the weather in Miami?"
-   - Recognizes this needs location + weather
-   - Creates plan: Step 1 = Geocode "Miami", Step 2 = Get Weather
-
-4. **Execution Phase:**
-   - ExecutionAgent reads the plan
-   - Runs Geocode tool → finds Miami coordinates
-   - Runs Weather tool → gets weather data
-   - Writes results to WorldState
-
-5. **Synthesis Phase:**
-   - SynthesisAgent sees all steps are done
-   - Reads weather data from WorldState
-   - Creates nice response: "It's 75°F and sunny in Miami"
-
-6. **Response** → Coordinator sends final answer back to user
-
-## The Data Structures That Hold Everything
-
-### WorldState (`utils/contracts.py`)
-
-This is the main data structure that holds everything:
-
-```python
-class WorldState(BaseModel):
-    meta: Dict[str, Any] = {"sessionId": None, "version": "2.0"}
-    user: Dict[str, Any] = {"locale": "en-US"}
-    query: Dict[str, Any] = {"raw": ""}  # The user's question
-    slots: Slots = Field(default_factory=Slots)  # Location data
-    context: Dict[str, Any] = {  # Shared information
-        "plan": {"steps": [], "status": "none"},
-        "completed_steps": [],
-        "lastWeather": {},
-        "conversation_response": {}
-    }
-    evidence: Dict[str, Any] = Field(default_factory=dict)
-    errors: List[str] = Field(default_factory=list)
-    memory: Dict[str, Any] = Field(default_factory=dict)
-```
-
-### Slots Structure
-
-```python
-class Slots(BaseModel):
-    origin: Dict[str, Any] = {"name": None, "lat": None, "lng": None}
-    destination: Dict[str, Any] = {"name": None, "lat": None, "lng": None}
-    departureTime: Optional[str] = None
-    modePrefs: List[str] = []
-```
-
-## Error Handling and Recovery
-
-The system is designed to handle problems gracefully:
-
-1. **API Failures:** If Google Maps is down, the error gets recorded and the system tries to continue
-2. **Invalid Input:** If user asks something unclear, the conversation tool handles it
-3. **Replanning:** If a step fails, the Planning Agent can create a new plan
-4. **Fallback Responses:** If everything fails, there are backup responses
-
-## Key Design Principles
-
-1. **Separation of Concerns:** Each agent has one job (plan, execute, synthesize)
-2. **Shared State:** All agents read/write to the same WorldState
-3. **Tool-Based Actions:** Real work is done by specialized tools
-4. **Error Resilience:** System continues working even when parts fail
-5. **Memory Persistence:** Conversations are saved and can be resumed
-
-## How To Run and Test The System
+**If in doubt, check the logs and inspect WorldState!**
 
 ### Basic Setup:
 ```bash
@@ -426,7 +230,7 @@ This architecture makes the system reliable, maintainable, and easy to understan
 The project is organized into clear folders that separate different types of code:
 
 ### `/agents/` - The AI Programs
-- **`agents.py`** - Contains the three main agent classes (PlanningAgent, ExecutionAgent, SynthesisAgent)
+- **`agents.py`** - Contains the two main agent classes (PlanningAgent, ExecutionAgent)
 - **`coordinator.py`** - Manages communication between agents
 - **`/tools/`** - Contains the specialized tools that do actual work:
   - `weather_tool.py` - Gets weather data from Google APIs
@@ -455,15 +259,14 @@ The project is organized into clear folders that separate different types of cod
 1. **User Input** → `main.py` receives the message
 2. **Coordinator** → `coordinator.py` creates WorldState and starts the process
 3. **Planning** → PlanningAgent analyzes the request and creates a plan
-4. **Execution** → ExecutionAgent runs each step using the appropriate tools
-5. **Synthesis** → SynthesisAgent creates the final response
-6. **Output** → Response goes back to user through `main.py`
+4. **Execution** → ExecutionAgent runs each step and creates the final response
+5. **Output** → Response goes back to user through `main.py`
 
 ### Error Handling Flow:
 1. **Detection** → Any agent/tool detects a problem
 2. **Recording** → Error gets added to `world_state.errors`
 3. **Recovery** → Coordinator may trigger replanning
-4. **Fallback** → SynthesisAgent provides helpful error message
+4. **Fallback** → ExecutionAgent provides helpful error message
 5. **Logging** → Everything gets recorded in `logs/app.log`
 
 ## Key Design Patterns Used
