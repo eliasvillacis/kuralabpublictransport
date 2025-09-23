@@ -82,7 +82,8 @@ def geocode_place(address: Optional[str] = None, cityHint: Optional[str] = None,
                 slot: {
                     "lat": lat,
                     "lng": lng,
-                    "name": formatted_address or query
+                    "name": formatted_address or query,
+                    "__source": "geocode"
                 }
             },
             "raw": first
@@ -142,7 +143,8 @@ def geolocate_user() -> dict:
                 "origin": {
                     "lat": lat,
                     "lng": lng,
-                    "name": "Current Location"
+                    "name": "Current Location",
+                    "__source": "geolocate"
                 }
             },
             "context": {
