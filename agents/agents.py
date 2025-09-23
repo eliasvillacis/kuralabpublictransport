@@ -647,6 +647,102 @@ Analyze the plan and current state, then execute the appropriate tools.
         if tools_plan:
             logger.info(f"ExecutionAgent: Executing selected tools: {tools_plan}")
 
+            # --- Executor-level guard: If the user's query appears to specify a new destination
+            # (e.g. contains an address like '116-11 Liberty Ave' or 'to 123 Main St') and the
+            # plan includes Directions but does not include a Geocode for that destination,
+            # prepend a Geocode step to ensure we don't reuse a stale slots.destination.
+            def _extract_address_from_query(q: str) -> Optional[str]:
+                if not q:
+                    return None
+                # look for phrases like 'to X' or 'get to X' or 'how do i get to X'
+                m = re.search(r"\b(?:to|get to|how to get to|how do i get to|towards|go to)\s+(.+)$", q, re.IGNORECASE)
+                if m:
+                    addr = m.group(1).strip().strip('?.!')
+                    # cut off trailing conversational fragments (via/by/from/in)
+                    addr = re.split(r"\s+via\s+|\s+by\s+|\s+from\s+|\s+in\s+", addr, flags=re.IGNORECASE)[0].strip()
+                    return addr
+                return None
+
+            def _looks_like_address(s: str) -> bool:
+                if not s:
+                    return False
+                # common house number patterns like '116-11', '123', etc.
+                if re.search(r"\d{1,5}[-\s]?\d{0,5}", s):
+                    return True
+                # common street type indicators
+                if re.search(r"\b(st|street|ave|avenue|rd|road|blvd|boulevard|ln|lane|way|drive|dr|court|ct|pkwy|parkway|terrace|pl|place)\b", s, re.IGNORECASE):
+                    return True
+                return False
+
+            try:
+                has_directions = any((t.get('name') == 'Directions') for t in tools_plan)
+                has_geocode_destination = any(
+                    (t.get('name') == 'Geocode' and (
+                        (t.get('args') or {}).get('slot') == 'destination' or
+                        (t.get('args') or {}).get('address') or
+                        (t.get('args') or {}).get('query')
+                    )) for t in tools_plan
+                )
+                if has_directions and not has_geocode_destination:
+                    # First, prefer asking the LLM whether the user's query indicates a new destination
+                    should_prepend = False
+                    address_candidate = None
+                    try:
+                        if self.llm:
+                            # Prepare a short JSON-only prompt asking whether the query replaces the current destination
+                            cur_dest = ''
+                            try:
+                                dest_slot = current_slots.get('destination') or {}
+                                cur_dest = dest_slot.get('name', '') if isinstance(dest_slot, dict) else ''
+                            except Exception:
+                                cur_dest = ''
+
+                            llm_check_prompt = json.dumps({
+                                'instruction': 'Decide if the user query specifies a new destination that is different from the current remembered destination. Return JSON only.',
+                                'query': query,
+                                'current_destination_name': cur_dest,
+                                'response_format': {'update_destination': 'bool', 'address': 'string (best candidate address or empty)'}
+                            }, indent=2)
+
+                            parsed_check = self._llm_json_request(llm_check_prompt, attempts=1)
+                            if parsed_check and isinstance(parsed_check, dict):
+                                update_flag = parsed_check.get('update_destination')
+                                addr = parsed_check.get('address') or None
+                                if update_flag:
+                                    should_prepend = True
+                                    address_candidate = addr or None
+                    except Exception:
+                        should_prepend = False
+
+                    # If LLM did not decide to update, fall back to conservative heuristic extraction
+                    if not should_prepend:
+                        try:
+                            extracted = _extract_address_from_query(query)
+                            # Relaxed heuristic: accept any non-trivial extracted phrase as a candidate
+                            # (handles place names like 'Limitless Fitness' or 'Washington Sq Park')
+                            if extracted:
+                                low = extracted.lower().strip()
+                                if low and low not in ('me', 'here') and len(low) > 1:
+                                    address_candidate = extracted
+                                    should_prepend = True
+                        except Exception:
+                            should_prepend = False
+
+                    if should_prepend and address_candidate:
+                        # compare against current destination slot name to avoid unnecessary geocode
+                        try:
+                            dest_slot = current_slots.get('destination') or {}
+                            existing_name = dest_slot.get('name', '') if isinstance(dest_slot, dict) else ''
+                        except Exception:
+                            existing_name = ''
+
+                        if not existing_name or address_candidate.lower() not in existing_name.lower():
+                            tools_plan.insert(0, {'name': 'Geocode', 'args': {'address': address_candidate, 'slot': 'destination'}})
+                            logger.info(f"ExecutionAgent: Prepending Geocode for address '{address_candidate}' (LLM/heuristic) to tools_plan to avoid stale destination")
+            except Exception:
+                # non-fatal: if our heuristics fail, proceed with original tools_plan
+                pass
+
             # Function to substitute placeholders like {{slots.origin.lat}} or ${temp_slot.lat}
             # This resolver will try to return native values (numbers/dicts) when the whole
             # string is a single ${...} expression so downstream tools receive correct types.
