@@ -46,11 +46,57 @@ class A2ACoordinator:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
+    def _merge_memory_into_world_state(self, world_state: WorldState) -> WorldState:
+        """Read persistent memory file and deep-merge its content into the provided world_state.
+
+        This ensures that per-query WorldState receives remembered context/slots so the
+        Planner and Executor can consult prior conversation memory for follow-ups.
+        """
+        try:
+            with open(self.memory_file, "r") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return world_state
+
+        # Build a delta that only includes context and slots from memory
+        delta = {}
+        if isinstance(data, dict):
+            if data.get("context"):
+                delta.setdefault("context", {})
+                deepMerge(delta["context"], data.get("context") or {})
+            if data.get("slots"):
+                delta.setdefault("slots", {})
+                deepMerge(delta["slots"], data.get("slots") or {})
+
+        if not delta:
+            return world_state
+
+        merged = world_state.model_dump()
+        # Merge memory delta into the world_state dict
+        deepMerge(merged, delta)
+        try:
+            return WorldState(**merged)
+        except Exception:
+            # If validation fails, return original world_state unchanged
+            return world_state
+
     def _save_memory(self):
         """Save conversation memory."""
         try:
+            # Persist both context and slots so follow-up queries can reuse remembered locations
+            slots_data = None
+            try:
+                # Pydantic model: prefer model_dump when available
+                slots_data = self.world_state.slots.model_dump() if hasattr(self.world_state.slots, 'model_dump') else (self.world_state.slots.dict() if hasattr(self.world_state.slots, 'dict') else self.world_state.slots)
+            except Exception:
+                try:
+                    slots_data = self.world_state.slots.dict() if hasattr(self.world_state.slots, 'dict') else self.world_state.slots
+                except Exception:
+                    slots_data = {}
+
             data = {
                 "context": self.world_state.context,
+                "slots": slots_data,
                 "last_updated": datetime.now().isoformat()
             }
             with open(self.memory_file, "w") as f:
@@ -65,6 +111,16 @@ class A2ACoordinator:
         # Initialize world state with user query
         self.world_state = WorldState()
         self.world_state.query = {"raw": user_query}
+
+        # Merge persistent conversation memory into the per-query world state so
+        # that Planner and Executor can consult remembered slots/context for
+        # follow-up queries (e.g., "how do I get there" where destination was
+        # provided in a previous turn).
+        try:
+            self.world_state = self._merge_memory_into_world_state(self.world_state)
+        except Exception:
+            # If merging memory fails for any reason, continue with the fresh world_state
+            pass
 
         try:
             # Step 1: Planner creates execution plan
