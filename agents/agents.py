@@ -414,6 +414,15 @@ class ExecutionAgent(BaseAgent):
                 except Exception:
                     plan_actions = []
 
+                # If we executed directions/transit, provide the full directions block to the LLM
+                directions_block = None
+                try:
+                    dir_ctx = execution_results.get('context', {}) or {}
+                    directions_block = dir_ctx.get('directions') or dir_ctx.get('transit_directions')
+                except Exception:
+                    directions_block = None
+
+                # Build an explicit prompt that forces detailed numbered steps when directions are present
                 response_prompt = f"""
 You are the Execution Agent for a transportation assistant. Based ONLY on the executed tool results below, provide a concise, factual final response.
 
@@ -421,15 +430,23 @@ User query: {query}
 Plan actions: {plan_actions}
 Tool execution results: {context_summary}
 
-IMPORTANT INSTRUCTIONS:
-- Do NOT provide directions, route planning, or travel recommendations unless the original plan explicitly included a 'Directions' action.
-- Use only information produced by the executed tools (context and slots). Do not invent or hallucinate routes, travel times, or recommendations.
-- For location queries (e.g., 'where am I'), return the human-readable address and short nearby references only.
-- For weather queries, return only the weather facts produced by the Weather tool.
-- If something went wrong or necessary information is missing, state that clearly and ask a clarifying question.
-
-Provide a natural language response to: {query}
 """
+
+                # If directions data is available, append it and instruct the LLM to produce step-by-step directions
+                if directions_block:
+                    try:
+                        directions_json = json.dumps(directions_block, indent=2)
+                    except Exception:
+                        directions_json = str(directions_block)
+                    response_prompt += f"\nDirections details (JSON):\n{directions_json}\n"
+                    response_prompt += (
+                        "IMPORTANT: The user requested directions. Provide a clear, numbered, step-by-step set of instructions (1., 2., 3., ...). "
+                        "Include walking steps and transit legs. For transit legs include vehicle type, line name, departure stop, arrival stop, and departure/arrival times when available. "
+                        "Start with a one-line summary of total time and distance, then list the numbered steps. Do NOT invent missing times or stops—use only the provided data."
+                    )
+
+                # Global safety instructions
+                response_prompt += f"\n\nIMPORTANT INSTRUCTIONS:\n- Use only information produced by the executed tools (context and slots). Do not invent or hallucinate routes, travel times, or recommendations.\n- For location queries (e.g., 'where am I'), return the human-readable address and short nearby references only.\n- For weather queries, return only the weather facts produced by the Weather tool.\n- If something went wrong or necessary information is missing, state that clearly and ask a clarifying question.\n\nProvide a natural language response to: {query}\n"
 
                 response = self.llm.invoke(response_prompt)
                 final_response = response.content.strip()
@@ -630,26 +647,79 @@ Analyze the plan and current state, then execute the appropriate tools.
         if tools_plan:
             logger.info(f"ExecutionAgent: Executing selected tools: {tools_plan}")
 
-            # Function to substitute placeholders like {{slots.origin.lat}}
-            def substitute_placeholders(value, world_state):
+            # Function to substitute placeholders like {{slots.origin.lat}} or ${temp_slot.lat}
+            # This resolver will try to return native values (numbers/dicts) when the whole
+            # string is a single ${...} expression so downstream tools receive correct types.
+            def substitute_placeholders(value, world_state, current_slots, results):
+                import re
+
+                def _lookup_path(path: str):
+                    parts = path.split('.')
+                    # 1) Try recent tool results slots
+                    obj = results.get('slots', {}) if isinstance(results, dict) else {}
+                    try:
+                        cur = obj
+                        for part in parts:
+                            if isinstance(cur, dict) and part in cur:
+                                cur = cur[part]
+                            else:
+                                raise KeyError
+                        return cur
+                    except Exception:
+                        pass
+
+                    # 2) Try current_slots
+                    obj = current_slots or {}
+                    try:
+                        cur = obj
+                        for part in parts:
+                            if isinstance(cur, dict) and part in cur:
+                                cur = cur[part]
+                            else:
+                                raise KeyError
+                        return cur
+                    except Exception:
+                        pass
+
+                    # 3) Try world_state attributes/dicts
+                    try:
+                        cur = world_state
+                        for part in parts:
+                            if hasattr(cur, part):
+                                cur = getattr(cur, part)
+                            elif isinstance(cur, dict) and part in cur:
+                                cur = cur[part]
+                            else:
+                                raise AttributeError
+                        return cur
+                    except Exception:
+                        return None
+
+                # Handle strings containing {{...}} using previous behavior (return strings)
                 if isinstance(value, str) and '{{' in value and '}}' in value:
-                    import re
                     def replacer(match):
                         path = match.group(1).strip()
-                        parts = path.split('.')
-                        obj = world_state
-                        try:
-                            for part in parts:
-                                if hasattr(obj, part):
-                                    obj = getattr(obj, part)
-                                elif isinstance(obj, dict) and part in obj:
-                                    obj = obj[part]
-                                else:
-                                    raise AttributeError(f"Cannot access {part} on {obj}")
-                            return obj
-                        except (AttributeError, KeyError, TypeError):
-                            return match.group(0)  # return original if not found
+                        found = _lookup_path(path)
+                        return str(found) if found is not None else match.group(0)
                     return re.sub(r'\{\{([^}]+)\}\}', replacer, value)
+
+                # Handle ${...} placeholders. If the entire value is a single ${...} pattern,
+                # return the native object (number/dict) so tools receive proper types.
+                if isinstance(value, str):
+                    full_match = re.fullmatch(r'\$\{([^}]+)\}', value.strip())
+                    if full_match:
+                        path = full_match.group(1).strip()
+                        found = _lookup_path(path)
+                        return found if found is not None else value
+
+                    # If ${...} appears inside a larger string, replace occurrences with their string form
+                    def replacer2(match):
+                        path = match.group(1).strip()
+                        found = _lookup_path(path)
+                        return str(found) if found is not None else match.group(0)
+                    if '${' in value and '}' in value:
+                        return re.sub(r'\$\{([^}]+)\}', replacer2, value)
+
                 return value
 
             # helper to merge tool output into results
@@ -695,8 +765,9 @@ Analyze the plan and current state, then execute the appropriate tools.
                 tool_args = tool.get('args', {}) or {}
                 # look-ahead for heuristics (e.g., geocoding for a subsequent Weather or Directions call)
                 next_tool = tools_plan[idx + 1] if idx + 1 < len(tools_plan) else {}
-                # Substitute placeholders in args
-                tool_args = {k: substitute_placeholders(v, world_state) for k, v in tool_args.items()}
+                # Substitute placeholders in args (supports {{...}} and ${...}); allow substitution
+                # to resolve to native types by checking recent results and current_slots.
+                tool_args = {k: substitute_placeholders(v, world_state, current_slots, results) for k, v in tool_args.items()}
 
                 try:
                     # Use .invoke on tools (langchain BaseTool) with a dict input
@@ -779,11 +850,25 @@ Analyze the plan and current state, then execute the appropriate tools.
                             lng = coords.get('lng')
                         elif isinstance(coords, str):
                             try:
-                                slot_name = coords.split('.', 1)[1] if coords.startswith('slots.') else coords
-                                sref = current_slots.get(slot_name) if isinstance(current_slots, dict) else None
-                                if sref and isinstance(sref, dict):
-                                    lat = lat or sref.get('lat')
-                                    lng = lng or sref.get('lng')
+                                # Special case: LLM may emit human phrasing like 'from previous Geocode'
+                                # In that case prefer the most recently produced slot from results['slots']
+                                coords_l = coords.lower()
+                                if 'previous' in coords_l:
+                                    last_slot = None
+                                    try:
+                                        last_slot_key = next(reversed(results.get('slots', {})))
+                                        last_slot = results.get('slots', {}).get(last_slot_key)
+                                    except Exception:
+                                        last_slot = None
+                                    if last_slot and isinstance(last_slot, dict):
+                                        lat = lat or last_slot.get('lat')
+                                        lng = lng or last_slot.get('lng')
+                                else:
+                                    slot_name = coords.split('.', 1)[1] if coords.startswith('slots.') else coords
+                                    sref = current_slots.get(slot_name) if isinstance(current_slots, dict) else None
+                                    if sref and isinstance(sref, dict):
+                                        lat = lat or sref.get('lat')
+                                        lng = lng or sref.get('lng')
                             except Exception:
                                 pass
 
@@ -841,10 +926,34 @@ Analyze the plan and current state, then execute the appropriate tools.
                         result = weather_current.invoke({"lat": lat, "lng": lng, "units": units})
                         # Normalize lastWeather into a labeled context key so multiple weather calls don't overwrite
                         if result and 'context' in result and 'lastWeather' in result['context']:
+                            # Choose a stable, unique key for this weather result.
                             if label:
                                 key = f"lastWeather_{label}"
                             elif slot:
-                                key = f"lastWeather_{slot}"
+                                base = f"lastWeather_{slot}"
+                                existing_ctx = results.get('context', {}) if isinstance(results, dict) else {}
+                                # If base key already exists, try to disambiguate using coordinates or name
+                                if base in existing_ctx or base in getattr(world_state, 'context', {}):
+                                    if lat is not None and lng is not None:
+                                        key = f"lastWeather_{slot}_{lat}_{lng}"
+                                    else:
+                                        # try to get name from recent slots or current_slots
+                                        name = None
+                                        s = (results.get('slots', {}) or {}).get(slot) or (current_slots.get(slot) if isinstance(current_slots, dict) else None)
+                                        if isinstance(s, dict):
+                                            name = s.get('name')
+                                        if name:
+                                            slug = re.sub(r"\W+", "_", str(name)).strip('_')
+                                            key = f"lastWeather_{slot}_{slug}"
+                                        else:
+                                            # fallback: append numeric suffix to make unique
+                                            i = 1
+                                            key = base
+                                            while key in existing_ctx or key in getattr(world_state, 'context', {}):
+                                                key = f"{base}_{i}"
+                                                i += 1
+                                else:
+                                    key = base
                             else:
                                 key = f"lastWeather_{lat}_{lng}"
                             result['context'][key] = result['context'].pop('lastWeather')
@@ -923,6 +1032,25 @@ Analyze the plan and current state, then execute the appropriate tools.
                     logger.warning(f"ExecutionAgent: Error executing tool {tool_name}: {e}")
                     results["errors"].append(f"Error executing tool {tool_name}: {e}")
 
+            # After executing all selected tools, synthesize a compact weather summary
+            try:
+                weather_entries = {}
+                for k, v in results.get('context', {}).items():
+                    if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
+                        label = k.split('lastWeather_', 1)[1]
+                        temp = v.get('temp')
+                        summary = v.get('summary')
+                        weather_entries[label] = {
+                            'temp': temp,
+                            'summary': summary,
+                            'lat': v.get('lat'),
+                            'lng': v.get('lng')
+                        }
+                if weather_entries:
+                    results.setdefault('context', {})['final_weather_summary'] = weather_entries
+            except Exception:
+                pass
+
             return results
 
         # Fallback: Execute plan steps one by one
@@ -953,13 +1081,83 @@ Analyze the plan and current state, then execute the appropriate tools.
                         lng = lng or coords.get('lng')
                     elif isinstance(coords, str):
                         try:
-                            slot_name = coords.split('.', 1)[1] if coords.startswith('slots.') else coords
-                            sref = current_slots.get(slot_name) if isinstance(current_slots, dict) else None
-                            if sref and isinstance(sref, dict):
-                                lat = lat or sref.get('lat')
-                                lng = lng or sref.get('lng')
+                            coords_l = coords.lower()
+                            if 'previous' in coords_l:
+                                # use most recent slot from results if available
+                                try:
+                                    last_slot_key = next(reversed(results.get('slots', {})))
+                                    last_slot = results.get('slots', {}).get(last_slot_key)
+                                    if last_slot and isinstance(last_slot, dict):
+                                        lat = lat or last_slot.get('lat')
+                                        lng = lng or last_slot.get('lng')
+                                except Exception:
+                                    pass
+                            else:
+                                slot_name = coords.split('.', 1)[1] if coords.startswith('slots.') else coords
+                                sref = current_slots.get(slot_name) if isinstance(current_slots, dict) else None
+                                if sref and isinstance(sref, dict):
+                                    lat = lat or sref.get('lat')
+                                    lng = lng or sref.get('lng')
                         except Exception:
                             pass
+                    # Resolve ${...} placeholders in lat/lng if present (e.g., '${temp_loc.lat}')
+                    def _resolve_placeholder_string(val):
+                        import re
+                        if not isinstance(val, str):
+                            return val
+                        m = re.fullmatch(r"\$\{([^}]+)\}", val.strip())
+                        if m:
+                            path = m.group(1).strip()
+                            parts = path.split('.')
+                            # try recent tool results slots
+                            try:
+                                cur = results.get('slots', {})
+                                for p in parts:
+                                    if isinstance(cur, dict) and p in cur:
+                                        cur = cur[p]
+                                    else:
+                                        raise KeyError
+                                return cur
+                            except Exception:
+                                pass
+                            # try current_slots
+                            try:
+                                cur = current_slots or {}
+                                for p in parts:
+                                    if isinstance(cur, dict) and p in cur:
+                                        cur = cur[p]
+                                    else:
+                                        raise KeyError
+                                return cur
+                            except Exception:
+                                pass
+                            return val
+                        # inline ${...} replacement -> return string
+                        if '${' in val:
+                            def rep(m2):
+                                path = m2.group(1).strip()
+                                parts = path.split('.')
+                                try:
+                                    cur = results.get('slots', {})
+                                    for p in parts:
+                                        if isinstance(cur, dict) and p in cur:
+                                            cur = cur[p]
+                                        else:
+                                            raise KeyError
+                                    return str(cur)
+                                except Exception:
+                                    try:
+                                        cur = current_slots or {}
+                                        for p in parts:
+                                            if isinstance(cur, dict) and p in cur:
+                                                cur = cur[p]
+                                            else:
+                                                raise KeyError
+                                        return str(cur)
+                                    except Exception:
+                                        return m2.group(0)
+                            return re.sub(r'\$\{([^}]+)\}', rep, val)
+                        return val
                     if (lat is None or lng is None) and slot:
                         s = current_slots.get(slot) or {}
                         lat = lat or s.get('lat')
@@ -1002,13 +1200,40 @@ Analyze the plan and current state, then execute the appropriate tools.
                             except Exception:
                                 pass
 
+                    # Ensure any placeholder strings are resolved to native types before invoking
+                    try:
+                        lat = _resolve_placeholder_string(lat)
+                        lng = _resolve_placeholder_string(lng)
+                    except Exception:
+                        pass
+
                     result = weather_current.invoke({"lat": lat, "lng": lng, "units": units}) if lat is not None and lng is not None else None
-                    # rename lastWeather key if present
+                    # rename lastWeather key if present using unique/disambiguating keys
                     if result and 'context' in result and 'lastWeather' in result['context']:
+                        existing_ctx = results.get('context', {}) if isinstance(results, dict) else {}
                         if label:
                             key = f"lastWeather_{label}"
                         elif slot:
-                            key = f"lastWeather_{slot}"
+                            base = f"lastWeather_{slot}"
+                            if base in existing_ctx or base in getattr(world_state, 'context', {}):
+                                if lat is not None and lng is not None:
+                                    key = f"lastWeather_{slot}_{lat}_{lng}"
+                                else:
+                                    name = None
+                                    s = (results.get('slots', {}) or {}).get(slot) or (current_slots.get(slot) if isinstance(current_slots, dict) else None)
+                                    if isinstance(s, dict):
+                                        name = s.get('name')
+                                    if name:
+                                        slug = re.sub(r"\W+", "_", str(name)).strip('_')
+                                        key = f"lastWeather_{slot}_{slug}"
+                                    else:
+                                        i = 1
+                                        key = base
+                                        while key in existing_ctx or key in getattr(world_state, 'context', {}):
+                                            key = f"{base}_{i}"
+                                            i += 1
+                            else:
+                                key = base
                         else:
                             key = f"lastWeather_{lat}_{lng}"
                         result['context'][key] = result['context'].pop('lastWeather')
@@ -1051,6 +1276,25 @@ Analyze the plan and current state, then execute the appropriate tools.
             except Exception as e:
                 logger.warning(f"ExecutionAgent: Error executing action {action}: {e}")
                 results["errors"].append(f"Error executing action {action}: {e}")
+
+        # Synthesize weather summary for fallback execution results as well
+        try:
+            weather_entries = {}
+            for k, v in results.get('context', {}).items():
+                if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
+                    label = k.split('lastWeather_', 1)[1]
+                    temp = v.get('temp')
+                    summary = v.get('summary')
+                    weather_entries[label] = {
+                        'temp': temp,
+                        'summary': summary,
+                        'lat': v.get('lat'),
+                        'lng': v.get('lng')
+                    }
+            if weather_entries:
+                results.setdefault('context', {})['final_weather_summary'] = weather_entries
+        except Exception:
+            pass
 
         return results
 
@@ -1112,9 +1356,52 @@ Analyze the plan and current state, then execute the appropriate tools.
         # Directions or transit info
         td = ctx.get('transit_directions') or ctx.get('directions')
         if td and isinstance(td, dict):
-            mode = td.get('mode') or td.get('transit_directions', {}).get('mode')
-            if mode:
-                return f"I found {mode} directions for you. See details above."
+            # Prefer nested transit_directions when present
+            transit = td.get('transit_directions') if td.get('transit_directions') else td
+            try:
+                mode = transit.get('mode') or transit.get('travel_mode') or 'route'
+                total_duration = transit.get('total_duration') or transit.get('duration') or ''
+                total_distance = transit.get('total_distance') or transit.get('distance') or ''
+                parts = [f"I found {mode} directions for you."]
+                if total_duration:
+                    parts.append(f"Total time: {total_duration}.")
+                if total_distance:
+                    parts.append(f"Distance: {total_distance}.")
+
+                # Build step-by-step instructions
+                legs = transit.get('legs', []) or []
+                step_lines = []
+                step_i = 1
+                for leg in legs:
+                    steps = leg.get('steps', []) or []
+                    for s in steps:
+                        travel_mode = s.get('travel_mode') or s.get('mode') or ''
+                        duration = s.get('duration') or ''
+                        instr = s.get('instructions') or s.get('instruction') or s.get('summary') or ''
+                        if travel_mode and travel_mode.upper() == 'TRANSIT' or s.get('transit'):
+                            transit_info = s.get('transit', {}) or {}
+                            line = transit_info.get('line_name') or transit_info.get('line') or ''
+                            vehicle = transit_info.get('vehicle_type') or ''
+                            dep = transit_info.get('departure_stop') or transit_info.get('departure') or ''
+                            arr = transit_info.get('arrival_stop') or transit_info.get('arrival') or ''
+                            dep_time = transit_info.get('departure_time') or ''
+                            arr_time = transit_info.get('arrival_time') or ''
+                            step_lines.append(f"{step_i}. Take {vehicle} {line} from {dep} to {arr} ({dep_time} - {arr_time})")
+                        else:
+                            # Walking or other non-transit steps
+                            if instr:
+                                step_lines.append(f"{step_i}. {instr} {f'({duration})' if duration else ''}".strip())
+                            else:
+                                step_lines.append(f"{step_i}. {travel_mode or 'Proceed'} {f'for {duration}' if duration else ''}".strip())
+                        step_i += 1
+
+                if step_lines:
+                    parts.append("Steps:")
+                    parts.extend(step_lines)
+
+                return " ".join(parts)
+            except Exception:
+                return "I found directions for you. See details above."
 
         # Last resort
         errors = execution_results.get('errors', [])
@@ -1261,9 +1548,52 @@ Analyze the plan and current state, then execute the appropriate tools.
         # Directions or transit info
         td = ctx.get('transit_directions') or ctx.get('directions')
         if td and isinstance(td, dict):
-            mode = td.get('mode') or td.get('transit_directions', {}).get('mode')
-            if mode:
-                return f"I found {mode} directions for you. See details above."
+            # Prefer nested transit_directions when present
+            transit = td.get('transit_directions') if td.get('transit_directions') else td
+            try:
+                mode = transit.get('mode') or transit.get('travel_mode') or 'route'
+                total_duration = transit.get('total_duration') or transit.get('duration') or ''
+                total_distance = transit.get('total_distance') or transit.get('distance') or ''
+                parts = [f"I found {mode} directions for you."]
+                if total_duration:
+                    parts.append(f"Total time: {total_duration}.")
+                if total_distance:
+                    parts.append(f"Distance: {total_distance}.")
+
+                # Build step-by-step instructions
+                legs = transit.get('legs', []) or []
+                step_lines = []
+                step_i = 1
+                for leg in legs:
+                    steps = leg.get('steps', []) or []
+                    for s in steps:
+                        travel_mode = s.get('travel_mode') or s.get('mode') or ''
+                        duration = s.get('duration') or ''
+                        instr = s.get('instructions') or s.get('instruction') or s.get('summary') or ''
+                        if travel_mode and travel_mode.upper() == 'TRANSIT' or s.get('transit'):
+                            transit_info = s.get('transit', {}) or {}
+                            line = transit_info.get('line_name') or transit_info.get('line') or ''
+                            vehicle = transit_info.get('vehicle_type') or ''
+                            dep = transit_info.get('departure_stop') or transit_info.get('departure') or ''
+                            arr = transit_info.get('arrival_stop') or transit_info.get('arrival') or ''
+                            dep_time = transit_info.get('departure_time') or ''
+                            arr_time = transit_info.get('arrival_time') or ''
+                            step_lines.append(f"{step_i}. Take {vehicle} {line} from {dep} to {arr} ({dep_time} - {arr_time})")
+                        else:
+                            # Walking or other non-transit steps
+                            if instr:
+                                step_lines.append(f"{step_i}. {instr} {f'({duration})' if duration else ''}".strip())
+                            else:
+                                step_lines.append(f"{step_i}. {travel_mode or 'Proceed'} {f'for {duration}' if duration else ''}".strip())
+                        step_i += 1
+
+                if step_lines:
+                    parts.append("Steps:")
+                    parts.extend(step_lines)
+
+                return " ".join(parts)
+            except Exception:
+                return "I found directions for you. See details above."
 
         # Last resort
         errors = execution_results.get('errors', [])
