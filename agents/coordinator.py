@@ -70,6 +70,10 @@ class A2ACoordinator:
 
         if not delta:
             return world_state
+        # Do not merge ephemeral response fields from memory (they are per-query)
+        # Prevent a stale `final_response` from being loaded into a fresh query
+        if "context" in delta and isinstance(delta["context"], dict):
+            delta["context"].pop("final_response", None)
 
         merged = world_state.model_dump()
         # Merge memory delta into the world_state dict
