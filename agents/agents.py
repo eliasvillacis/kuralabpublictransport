@@ -1,5 +1,5 @@
 ﻿"""
-Kura Public Transport Assistant - Agent Architecture
+Vaya Public Transport Assistant - Agent Architecture
 
 Two-agent architecture for transportation assistance:
 - Planner (LLM): Produces structured JSON plans for user queries
@@ -21,12 +21,34 @@ from utils.state import deepMerge, compact_world_state
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # Tool imports
-from agents.tools.weather_tool import weather_current
-from agents.tools.location_tool import geocode_place, geolocate_user, reverse_geocode
-from agents.tools.conversation_tool import handle_conversation
-from agents.tools.directions_tool import directions
+from .tools.weather_tool import weather_current
+from .tools.location_tool import geocode_place, geolocate_user, reverse_geocode
+from .tools.conversation_tool import handle_conversation
+from .tools.directions_tool import directions
+from .tools.places_tool import places_search as PlacesSearch, place_details as PlaceDetails
 
 logger = get_logger(__name__)
+
+# Tool registry and aliases for convenient resolution
+TOOL_REGISTRY = {
+    "Geolocate": geolocate_user,
+    "Geocode": geocode_place,
+    "ReverseGeocode": reverse_geocode,
+    "Weather": weather_current,
+    "Directions": directions,
+    "PlacesSearch": PlacesSearch,
+    "PlaceDetails": PlaceDetails,
+    "Conversation": handle_conversation,
+}
+
+TOOL_ALIASES = {
+    "Places": "PlacesSearch",
+    "POISearch": "PlacesSearch",
+    "FindNearestPOI": "PlacesSearch",
+}
+
+def resolve_tool_name(name: str) -> str:
+    return TOOL_ALIASES.get((name or "").strip(), (name or "").strip())
 
 
 class BaseAgent(ABC):
@@ -67,6 +89,23 @@ class BaseAgent(ABC):
         for attempt in range(1, attempts + 1):
             try:
                 resp = self.llm.invoke(prompt)
+                # Try to log LLM usage if available (guarded)
+                try:
+                    usage = getattr(resp, 'usage_metadata', None) or getattr(resp, 'usage', None) or {}
+                    model_name = getattr(self.llm, 'model', None) or getattr(self.llm, 'model_name', None) or 'unknown'
+                    if usage:
+                        try:
+                            log_llm_usage(agent=self.name, model=model_name, usage={
+                                'input_tokens': usage.get('input_tokens', usage.get('input', 0)),
+                                'output_tokens': usage.get('output_tokens', usage.get('output', 0)),
+                                'total_tokens': usage.get('total_tokens', usage.get('total', usage.get('input', 0) + usage.get('output', 0)))
+                            })
+                        except Exception:
+                            # Do not let logging failures break the LLM call
+                            logger.debug('Failed to log LLM usage from BaseAgent._llm_json_request')
+                except Exception:
+                    pass
+
                 text = str(getattr(resp, 'content', resp)).strip()
                 last_resp_text = text
                 # extract the first {...} block
@@ -187,7 +226,7 @@ Return only the JSON, no other text.
     def process(self, world_state: WorldState) -> Dict[str, Any]:
         """Generate execution plan for user query."""
         query = world_state.query.get("raw", "")
-        if not query:
+        if not query or query.strip() == "":
             return {"deltaState": {"context": {"plan": {"steps": [], "status": "complete"}}}}
         # Try LLM planning first. Support limited retries for transient LLM failures.
         max_retries = 2
@@ -231,10 +270,10 @@ Return only the JSON, no other text.
 
     def _heuristic_plan(self, query: str, world_state: WorldState = None) -> Dict[str, Any]:
         """Fallback heuristic planning when LLM fails."""
-        q = query.lower()
+        q = (query or "").lower()
 
-        # Check for directions queries
-        if any(word in q for word in ["directions", "get to", "how to get", "take me to", "from", "to"]):
+        # Detect directions queries using more specific patterns to avoid false positives
+        if re.search(r"\b(directions|how (do i|to) get|take me to|get to|how do i get to)\b", q) or re.search(r"\bto\s+\w+", q):
             # If user used a pronoun like 'there' and we have a remembered destination, reuse it
             destination = query
             try:
@@ -339,6 +378,51 @@ class ExecutionAgent(BaseAgent):
     def __init__(self):
         super().__init__("executor", "gemini-1.5-flash", 0.2)
 
+    # Shared small helpers used across execution flows
+    def _merge_tool_output(self, results: dict, tool_name: str, out: dict):
+        """Merge a tool's output into the running results dict in a consistent way."""
+        if not isinstance(out, dict):
+            return
+        # slots
+        if out.get('slots'):
+            try:
+                for k, v in out.get('slots', {}).items():
+                    results.setdefault('slots', {})[k] = v
+            except Exception:
+                pass
+        # context
+        if out.get('context'):
+            try:
+                for k, v in out.get('context', {}).items():
+                    results.setdefault('context', {})[k] = v
+            except Exception:
+                pass
+        # other top-level keys attach under context with tool prefix
+        for k, v in out.items():
+            if k not in ('slots', 'context'):
+                results.setdefault('context', {})[f"{tool_name}_{k}"] = v
+
+    def _summarize_weather(self, results: dict) -> dict:
+        """Extract labeled lastWeather_* entries into a final_weather_summary map."""
+        try:
+            weather_entries = {}
+            for k, v in list(results.get('context', {}).items()):
+                if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
+                    label = k.split('lastWeather_', 1)[1]
+                    temp = v.get('temp')
+                    summary = v.get('summary')
+                    weather_entries[label] = {
+                        'temp': temp,
+                        'summary': summary,
+                        'lat': v.get('lat'),
+                        'lng': v.get('lng')
+                    }
+            if weather_entries:
+                results.setdefault('context', {})['final_weather_summary'] = weather_entries
+        except Exception:
+            pass
+        return results
+
     def get_name(self) -> str:
         """Return the agent\'s name."""
         return self.name
@@ -403,7 +487,6 @@ class ExecutionAgent(BaseAgent):
             try:
                 logger.info("ExecutionAgent: Generating final response")
                 context_summary = self._prepare_context_summary(world_state, execution_results)
-                context_summary = self._prepare_context_summary(world_state, execution_results)
 
                 # Determine what high-level actions the Planner requested so the LLM does not invent
                 # unrelated content. If the plan did not request Directions, explicitly forbid giving
@@ -451,12 +534,13 @@ Tool execution results: {context_summary}
                 response = self.llm.invoke(response_prompt)
                 final_response = response.content.strip()
 
-                # Log LLM usage
+                # Log LLM usage (guard attributes for different providers)
                 try:
-                    usage = response.usage_metadata
+                    usage = getattr(response, 'usage_metadata', {}) or {}
+                    model_name = getattr(self.llm, 'model', None) or getattr(self.llm, 'model_name', None) or 'unknown'
                     log_llm_usage(
                         agent=self.name,
-                        model=self.llm.model,
+                        model=model_name,
                         usage={
                             'input_tokens': usage.get('input_tokens', 0),
                             'output_tokens': usage.get('output_tokens', 0),
@@ -546,7 +630,9 @@ Available tools:
 - Geocode: Convert address to coordinates (returns coordinates in slots.origin or slots.destination)
 - ReverseGeocode: Convert coordinates to human-readable address (needs lat/lng from slots)
 - Weather: Get current weather (needs coordinates from slots)
-- Directions: Get directions between locations (handles geolocation/geocoding automatically)
+- PlacesSearch: Search for places like restaurants or stores. Use this for queries like "nearest coffee" or "pizza nearby". Requires a 'near' location from Geolocate or a slot.
+- PlaceDetails: Get more details about a specific place using its placeId.
+- Directions: Get directions between locations (handles geolocation/geocoding automatically). For POIs, use the output of PlacesSearch to provide a destinationPlaceId.
 - Conversation: Handle casual conversation
 
 Guidelines:
@@ -561,7 +647,22 @@ Analyze the plan and current state, then execute the appropriate tools.
 """
 
         # Ask LLM to reason step-by-step and suggest tools, then provide JSON.
-        tool_selection_prompt = execution_prompt + "\n\nPlease think step-by-step and explain which tools you would use and why. Then, provide a JSON list of tools at the end in the format: {'tools':[{'name':'ToolName','args':{...}}], 'notes': 'optional'}"
+        tool_selection_prompt = f"""
+{execution_prompt}
+
+Please think step-by-step and explain which tools you would use and why.
+At the end of your message, include ONLY a single JSON object (no surrounding backticks) containing the planned tools.
+The JSON should follow this structure exactly:
+
+{{
+    "tools": [
+        {{"name": "ToolName", "args": {{}}}}
+    ],
+    "notes": "optional"
+}}
+
+Return only the JSON object at the end of the message.
+"""
         try:
             reasoning_response = self.llm.invoke(tool_selection_prompt)
             reasoning_text = str(getattr(reasoning_response, 'content', reasoning_response)).strip()
@@ -646,6 +747,110 @@ Analyze the plan and current state, then execute the appropriate tools.
         # If tool selection succeeded, execute the selected tools
         if tools_plan:
             logger.info(f"ExecutionAgent: Executing selected tools: {tools_plan}")
+
+            # Autopatch places: ensure any Directions steps with 'query' or POI-like utterances
+            # get a PlacesSearch inserted before them and rewrite to destinationPlaceId.
+            BRANDS = {"burger king","dunkin","dunkin donuts","mcdonalds","mcdonald","starbucks","pizza","coffee","cafe","bagel","donuts","pharmacy","7-eleven"}
+            NEAR_TERMS = {"near me","nearby","closest","nearest","around"}
+
+            def is_poi_intent(utter: str) -> bool:
+                u = (utter or "").lower()
+                return any(t in u for t in NEAR_TERMS) or any(b in u for b in BRANDS)
+
+            def autopatch_places(plan, world_state):
+                # Extract utterance from world_state.query
+                utter = ''
+                try:
+                    query_obj = getattr(world_state, 'query', None)
+                    if query_obj:
+                        if hasattr(query_obj, 'raw'):
+                            utter = query_obj.raw
+                        elif isinstance(query_obj, dict):
+                            utter = query_obj.get('raw', '')
+                        else:
+                            utter = str(query_obj)
+                except Exception:
+                    utter = ''
+                
+                poi_intent = is_poi_intent(utter)
+
+                # Check if PlacesSearch is already in the plan
+                has_places_search = any(step.get('name') == 'PlacesSearch' for step in plan)
+
+                new = []
+                for step in plan:
+                    name = step.get('name') or step.get('action') or ''
+                    args = step.setdefault('args', {})
+
+                    if name == 'Directions':
+                        has_dest = any(k in args for k in ("destination","destinationPlaceId","destinationLatLng"))
+
+                        # A) if planner stuffed a 'query' into Directions, split it out
+                        if 'query' in args:
+                            q = args.pop('query')
+                            if not has_places_search:
+                                new.append({'name':'PlacesSearch','args':{'query': q, 'rankBy':'distance', 'maxResults':5}})
+                            args['destinationPlaceId'] = '${context.places.results[0].placeId}'
+                            args.pop('destination', None)
+                        # B) if no destination and the utterance is a POI intent, add Places or use existing
+                        elif not has_dest and poi_intent:
+                            q = utter
+                            if not has_places_search:
+                                new.append({'name':'PlacesSearch','args':{'query': q, 'rankBy':'distance', 'maxResults':5}})
+                            args['destinationPlaceId'] = '${context.places.results[0].placeId}'
+                            args.pop('destination', None)
+
+                    new.append(step)
+                return new
+
+            try:
+                tools_plan = autopatch_places(tools_plan, world_state)
+                # ensure PlacesSearch have near or Geolocate inserted
+                tools_plan = ensure_places_has_near(tools_plan, world_state)
+                logger.info("Final tools_plan (post-autopatch): %s", json.dumps(tools_plan, indent=2))
+            except Exception:
+                logger.debug("Autopatch places failed; proceeding with original tools_plan")
+
+            # Helper: resolve slot-like synonyms into actual lat/lng dicts when possible
+            SLOT_SYNONYMS = {"origin", "current location", "my location", "here"}
+
+            def resolve_slotish(value, slots):
+                # If already a dict with lat/lng, pass through
+                if isinstance(value, dict) and value.get('lat') is not None and value.get('lng') is not None:
+                    return value
+                if isinstance(value, str):
+                    v = value.strip().lower()
+                    if v in SLOT_SYNONYMS and isinstance(slots, dict) and slots.get('origin'):
+                        o = slots.get('origin')
+                        try:
+                            return {"lat": o.get('lat'), "lng": o.get('lng')}
+                        except Exception:
+                            return value
+                return value
+
+            # Ensure PlacesSearch steps have a 'near' argument; if slots.origin missing, add Geolocate step first
+            def ensure_places_has_near(plan, world_state):
+                slots = world_state.slots.model_dump() if hasattr(world_state.slots, 'model_dump') else world_state.slots
+                origin = slots.get('origin')
+                new = []
+                for step in plan:
+                    name = resolve_tool_name(step.get('name', ''))
+                    args = step.setdefault('args', {})
+                    if name == 'PlacesSearch':
+                        if not args.get('near'):
+                            if origin and origin.get('lat') and origin.get('lng'):
+                                args['near'] = {"lat": origin.get('lat'), "lng": origin.get('lng')}
+                            else:
+                                # Insert a geolocate before this PlacesSearch
+                                new.append({'name': 'Geolocate', 'args': {}})
+                    new.append(step)
+                return new
+
+            # Run ensure_places_has_near to make sure PlacesSearch steps can execute
+            try:
+                tools_plan = ensure_places_has_near(tools_plan, world_state)
+            except Exception:
+                pass
 
             # --- Executor-level guard: If the user's query appears to specify a new destination
             # (e.g. contains an address like '116-11 Liberty Ave' or 'to 123 Main St') and the
@@ -756,10 +961,23 @@ Analyze the plan and current state, then execute the appropriate tools.
                     try:
                         cur = obj
                         for part in parts:
-                            if isinstance(cur, dict) and part in cur:
-                                cur = cur[part]
+                            # Handle array indexing like 'results[0]'
+                            if '[' in part and part.endswith(']'):
+                                key, index_str = part.split('[', 1)
+                                index_str = index_str.rstrip(']')
+                                if isinstance(cur, dict) and key in cur:
+                                    cur = cur[key]
+                                else:
+                                    raise KeyError
+                                if isinstance(cur, list) and index_str.isdigit():
+                                    cur = cur[int(index_str)]
+                                else:
+                                    raise KeyError
                             else:
-                                raise KeyError
+                                if isinstance(cur, dict) and part in cur:
+                                    cur = cur[part]
+                                else:
+                                    raise KeyError
                         return cur
                     except Exception:
                         pass
@@ -769,10 +987,23 @@ Analyze the plan and current state, then execute the appropriate tools.
                     try:
                         cur = obj
                         for part in parts:
-                            if isinstance(cur, dict) and part in cur:
-                                cur = cur[part]
+                            # Handle array indexing like 'results[0]'
+                            if '[' in part and part.endswith(']'):
+                                key, index_str = part.split('[', 1)
+                                index_str = index_str.rstrip(']')
+                                if isinstance(cur, dict) and key in cur:
+                                    cur = cur[key]
+                                else:
+                                    raise KeyError
+                                if isinstance(cur, list) and index_str.isdigit():
+                                    cur = cur[int(index_str)]
+                                else:
+                                    raise KeyError
                             else:
-                                raise KeyError
+                                if isinstance(cur, dict) and part in cur:
+                                    cur = cur[part]
+                                else:
+                                    raise KeyError
                         return cur
                     except Exception:
                         pass
@@ -781,12 +1012,27 @@ Analyze the plan and current state, then execute the appropriate tools.
                     try:
                         cur = world_state
                         for part in parts:
-                            if hasattr(cur, part):
-                                cur = getattr(cur, part)
-                            elif isinstance(cur, dict) and part in cur:
-                                cur = cur[part]
+                            # Handle array indexing like 'results[0]'
+                            if '[' in part and part.endswith(']'):
+                                key, index_str = part.split('[', 1)
+                                index_str = index_str.rstrip(']')
+                                if hasattr(cur, key):
+                                    cur = getattr(cur, key)
+                                elif isinstance(cur, dict) and key in cur:
+                                    cur = cur[key]
+                                else:
+                                    raise AttributeError
+                                if isinstance(cur, list) and index_str.isdigit():
+                                    cur = cur[int(index_str)]
+                                else:
+                                    raise AttributeError
                             else:
-                                raise AttributeError
+                                if hasattr(cur, part):
+                                    cur = getattr(cur, part)
+                                elif isinstance(cur, dict) and part in cur:
+                                    cur = cur[part]
+                                else:
+                                    raise AttributeError
                         return cur
                     except Exception:
                         return None
@@ -818,29 +1064,7 @@ Analyze the plan and current state, then execute the appropriate tools.
 
                 return value
 
-            # helper to merge tool output into results
-            def _merge_tool_output(tool_name, out):
-                if not isinstance(out, dict):
-                    return
-                # slots
-                if out.get('slots'):
-                    try:
-                        # merge slot dicts
-                        for k, v in out.get('slots', {}).items():
-                            results['slots'][k] = v
-                    except Exception:
-                        pass
-                # context
-                if out.get('context'):
-                    try:
-                        for k, v in out.get('context', {}).items():
-                            results['context'][k] = v
-                    except Exception:
-                        pass
-                # any other top-level keys (raw, etc.) attach under context
-                for k, v in out.items():
-                    if k not in ('slots', 'context'):
-                        results['context'][f"{tool_name}_{k}"] = v
+            # use instance _merge_tool_output to merge tool outputs into results
 
             # If user explicitly asked 'where am i', ensure we geolocate first
             try:
@@ -856,6 +1080,55 @@ Analyze the plan and current state, then execute the appropriate tools.
             except Exception:
                 pass
 
+
+            # --- PATCH: If user did not ask for directions, only run PlacesSearch and return results ---
+            # Detect if the user query is a pure POI/PlacesSearch (e.g. 'nearest dunkin')
+            user_query = world_state.query.get('raw', '').lower() if hasattr(world_state, 'query') else ''
+            wants_directions = any(
+                kw in user_query for kw in [
+                    'directions', 'how do i get', 'how to get', 'route', 'take me', 'get to', 'navigate', 'go to', 'how do i go', 'how can i get', 'how can i go', 'how do i reach', 'how can i reach', 'how do i travel', 'how can i travel', 'transit', 'walk', 'bus', 'subway', 'train', 'drive', 'driving', 'walking', 'public transport', 'public transit', 'commute', 'travel to', 'show me directions', 'show directions', 'show route', 'show me how', 'show me the way', 'show me the route', 'show me the directions'
+                ]
+            )
+            # If the plan is just PlacesSearch (or PlacesSearch + Directions) and the user did NOT ask for directions, only run PlacesSearch
+            only_places = False
+            if tools_plan and len(tools_plan) >= 1:
+                # If first tool is PlacesSearch and (no Directions or Directions is second)
+                first_is_places = tools_plan[0].get('name') == 'PlacesSearch'
+                has_directions = any(t.get('name') == 'Directions' for t in tools_plan)
+                if first_is_places and (not has_directions or (len(tools_plan) == 2 and tools_plan[1].get('name') == 'Directions')) and not wants_directions:
+                    only_places = True
+
+            if only_places:
+                # Only run PlacesSearch, skip Directions
+                tool = tools_plan[0]
+                tool_name = tool.get('name')
+                tool_args = tool.get('args', {}) or {}
+                # Substitute placeholders and resolve slots
+                tool_args = {k: substitute_placeholders(v, world_state, current_slots, results) for k, v in tool_args.items()}
+                if tool_name == "PlacesSearch" and not tool_args.get("near") and current_slots.get("origin"):
+                    tool_args["near"] = current_slots["origin"]
+                result = PlacesSearch.func(**tool_args)
+                # merge tool output
+                if isinstance(result, dict):
+                    self._merge_tool_output(results, tool_name, result)
+                # Generate a summary of the nearest locations
+                places = (result.get('context', {}) or {}).get('places', {})
+                results['context'] = results.get('context', {})
+                results['context']['places'] = places
+                # Prepare a user-facing summary
+                summary_lines = []
+                results_list = places.get('results', []) if isinstance(places, dict) else []
+                if results_list:
+                    summary_lines.append(f"Here are the nearest results for '{tool_args.get('query','')}':")
+                    for i, p in enumerate(results_list[:5]):
+                        summary_lines.append(f"{i+1}. {p.get('name','?')} — {p.get('address','?')} ({p.get('distanceMeters','?')} meters away)")
+                else:
+                    summary_lines.append("No results found.")
+                results['context']['final_response'] = '\n'.join(summary_lines)
+                return results
+
+            # --- END PATCH ---
+
             for idx, tool in enumerate(tools_plan):
                 tool_name = tool.get('name')
                 tool_args = tool.get('args', {}) or {}
@@ -865,10 +1138,89 @@ Analyze the plan and current state, then execute the appropriate tools.
                 # to resolve to native types by checking recent results and current_slots.
                 tool_args = {k: substitute_placeholders(v, world_state, current_slots, results) for k, v in tool_args.items()}
 
+                # --- SLOT REFERENCE RESOLUTION ---
+                # For PlacesSearch, Directions, Geocode: resolve slot names like 'origin', 'destination' to dicts
+                slot_fields = []
+                if tool_name in ("PlacesSearch",):
+                    slot_fields = ["near"]
+                elif tool_name in ("Directions",):
+                    slot_fields = ["origin", "destination"]
+                elif tool_name in ("Geocode",):
+                    slot_fields = ["origin", "destination"]
+                for field in slot_fields:
+                    val = tool_args.get(field)
+                    if isinstance(val, str) and val in current_slots:
+                        tool_args[field] = current_slots[val]
+                # Special: if PlacesSearch.near is missing but 'origin' slot exists, fill it
+                if tool_name == "PlacesSearch" and not tool_args.get("near") and current_slots.get("origin"):
+                    tool_args["near"] = current_slots["origin"]
+
                 try:
                     # Use .invoke on tools (langchain BaseTool) with a dict input
+                    # Preflight: detect Directions steps that lack a concrete destination or use generic/brand queries
+                    # and insert a PlacesSearch step before Directions so we can route to a place_id.
+                    GENERIC_TERMS = {"near me", "nearby", "closest", "nearest", "near"}
+                    BRANDS = {"dunkin", "dunkin donuts", "dunkin' donuts", "starbucks", "7-eleven", "pizza", "bagel", "coffee", "pharmacy", "cafe"}
+
+                    if tool_name == 'Directions':
+                        dest_arg = (tool_args or {}).get('destination')
+                        dest_placeid = (tool_args or {}).get('destinationPlaceId')
+
+                        # get a best-effort user utterance to detect 'near me' style phrases
+                        try:
+                            utterance = ''
+                            if isinstance(world_state, dict):
+                                utterance = (world_state.get('query') or {}).get('raw') or ''
+                            else:
+                                # WorldState might be a pydantic model-like object
+                                utterance = getattr(getattr(world_state, 'query', {}), 'get', lambda k, d=None: d)('raw', '') or ''
+                        except Exception:
+                            utterance = ''
+
+                        # normalize strings for checks
+                        dest_str = dest_arg.lower() if isinstance(dest_arg, str) else ''
+                        utter_lower = str(utterance).lower() if utterance else ''
+
+                        needs_places = False
+                        # If caller already supplied a place id, no need
+                        if not dest_placeid:
+                            # Missing destination altogether -> need PlacesSearch
+                            if not dest_arg:
+                                needs_places = True
+                            else:
+                                # If destination text contains brand/poi tokens, or the original
+                                # utterance contains 'near me'/'nearby' etc, we should do PlacesSearch
+                                if any(b in dest_str for b in BRANDS):
+                                    needs_places = True
+                                elif any(b in (tool_args.get('query') or '').lower() for b in BRANDS):
+                                    needs_places = True
+                                elif any(term in utter_lower for term in GENERIC_TERMS):
+                                    needs_places = True
+
+                        if needs_places:
+                            # map a few tokens to a likely type to improve nearby search relevance
+                            token = (dest_arg or tool_args.get('query') or utterance or '').lower()
+                            ptype = None
+                            if any(x in token for x in ('dunkin', 'coffee', 'bagel')):
+                                ptype = 'cafe'
+                            elif 'pizza' in token:
+                                ptype = 'restaurant'
+
+                            search_args = {'query': (dest_arg or token or '').strip(), 'near': current_slots.get('origin'), 'rankBy': 'distance', 'type': ptype, 'maxResults': 5}
+                            tools_plan.insert(idx, {'name': 'PlacesSearch', 'args': search_args})
+                            # rewrite the Directions step to use the first places result's placeId
+                            tool_args.pop('destination', None)
+                            tool_args['destinationPlaceId'] = '${context.places.results[0].placeId}'
+                            if not tool_args.get('origin'):
+                                tool_args['origin'] = '${slots.origin}'
+                            tool['args'] = tool_args
+                            # continue; the next loop will execute the inserted PlacesSearch first
+                            continue
                     if tool_name == "Geolocate":
-                        result = geolocate_user.invoke({})
+                        result = geolocate_user.func()
+                    elif tool_name == "PlacesSearch":
+                        # call PlacesSearch tool; tool_args should match the PlacesSearch signature
+                        result = PlacesSearch.func(**tool_args)
                     elif tool_name == "Geocode":
                         # Determine default slot: if the next planned tool is Weather or Directions,
                         # prefer writing to the 'destination' slot (so we don't overwrite origin used for 'near me').
@@ -906,7 +1258,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                             except Exception:
                                 address = address
 
-                        result = geocode_place.invoke({"address": address, "slot": default_slot})
+                        result = geocode_place.func(address=address, slot=default_slot)
                     elif tool_name == "ReverseGeocode":
                         # If origin is present but was populated by geocode (e.g., user asked about remote city),
                         # prefer running Geolocate first to obtain the user's real current location.
@@ -916,8 +1268,8 @@ Analyze the plan and current state, then execute the appropriate tools.
                         # run Geolocate to refresh origin before reverse geocoding.
                         if origin_source == 'geocode' and not (tool_args.get('lat') or tool_args.get('lng')):
                             try:
-                                geo_res = geolocate_user.invoke({})
-                                _merge_tool_output('Geolocate', geo_res)
+                                geo_res = geolocate_user.func()
+                                self._merge_tool_output(results, 'Geolocate', geo_res)
                                 current_slots.update(results['slots'])
                                 # update origin_slot variable
                                 origin_slot = current_slots.get('origin') or {}
@@ -926,7 +1278,7 @@ Analyze the plan and current state, then execute the appropriate tools.
 
                         lat = tool_args.get('lat') or origin_slot.get('lat')
                         lng = tool_args.get('lng') or origin_slot.get('lng')
-                        result = reverse_geocode.invoke({"lat": lat, "lng": lng}) if lat is not None and lng is not None else None
+                        result = reverse_geocode.func(lat=lat, lng=lng) if lat is not None and lng is not None else None
                     elif tool_name == "Weather":
                         # Support multiple argument styles for Weather:
                         # - {'lat': .., 'lng': ..}
@@ -1010,7 +1362,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                             if not origin_has_coords or origin_source == 'geocode':
                                 try:
                                     geo_res = geolocate_user.invoke({})
-                                    _merge_tool_output('Geolocate', geo_res)
+                                    self._merge_tool_output(results, 'Geolocate', geo_res)
                                     current_slots.update(results['slots'])
                                     origin_slot = current_slots.get('origin') or {}
                                 except Exception:
@@ -1019,7 +1371,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                         if lat is None or lng is None:
                             raise ValueError("Missing coordinates for Weather tool")
 
-                        result = weather_current.invoke({"lat": lat, "lng": lng, "units": units})
+                        result = weather_current.func(lat=lat, lng=lng, units=units)
                         # Normalize lastWeather into a labeled context key so multiple weather calls don't overwrite
                         if result and 'context' in result and 'lastWeather' in result['context']:
                             # Choose a stable, unique key for this weather result.
@@ -1089,7 +1441,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                             else:
                                 try:
                                     geo_res = geolocate_user.invoke({})
-                                    _merge_tool_output('Geolocate', geo_res)
+                                    self._merge_tool_output(results, 'Geolocate', geo_res)
                                     current_slots.update(results['slots'])
                                     origin_slot = current_slots.get('origin') or {}
                                     if origin_slot.get('lat') and origin_slot.get('lng'):
@@ -1097,55 +1449,37 @@ Analyze the plan and current state, then execute the appropriate tools.
                                 except Exception:
                                     pass
 
-                        result = directions.invoke({"destination": dest_val or "", "origin": orig_val})
+                        result = directions.func(destination=dest_val or "", origin=orig_val)
                     elif tool_name == "Conversation":
-                        result = handle_conversation.invoke({"message": tool_args.get('message', query)})
+                        result = handle_conversation.func(message=tool_args.get('message', query))
+                    elif tool_name == "PlaceDetails":
+                        result = PlaceDetails.func(**tool_args)
                     else:
                         logger.warning(f"ExecutionAgent: Unknown tool: {tool_name}")
                         continue
 
                     logger.info(f"ExecutionAgent: Tool {tool_name} executed successfully: {result}")
                     results["tools_executed"].append(tool_name)
-                    # merge tool output with conflict resolution for slots
-                    if isinstance(result, dict) and result.get('slots'):
-                        for k, v in result.get('slots', {}).items():
-                            try:
-                                if _should_overwrite_slot(k, v):
-                                    results['slots'][k] = v
-                            except Exception:
-                                results['slots'][k] = v
-                    # merge context as before
-                    if isinstance(result, dict) and result.get('context'):
-                        for k, v in result.get('context', {}).items():
-                            results['context'][k] = v
-                    # store any other top-level keys under context
-                    for k, v in (result.items() if isinstance(result, dict) else []):
-                        if k not in ('slots', 'context'):
-                            results['context'][f"{tool_name}_{k}"] = v
-                    current_slots.update(results['slots'])
+                    # merge tool output using the shared helper, preserving overwrite rules for slots
+                    if isinstance(result, dict):
+                        # slots: use overwrite heuristic
+                        if result.get('slots'):
+                            for k, v in result.get('slots', {}).items():
+                                try:
+                                    if _should_overwrite_slot(k, v):
+                                        results.setdefault('slots', {})[k] = v
+                                except Exception:
+                                    results.setdefault('slots', {})[k] = v
+                        # context and others: use shared merge helper
+                        self._merge_tool_output(results, tool_name, result)
+                    current_slots.update(results.get('slots', {}))
 
                 except Exception as e:
                     logger.warning(f"ExecutionAgent: Error executing tool {tool_name}: {e}")
                     results["errors"].append(f"Error executing tool {tool_name}: {e}")
 
             # After executing all selected tools, synthesize a compact weather summary
-            try:
-                weather_entries = {}
-                for k, v in results.get('context', {}).items():
-                    if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
-                        label = k.split('lastWeather_', 1)[1]
-                        temp = v.get('temp')
-                        summary = v.get('summary')
-                        weather_entries[label] = {
-                            'temp': temp,
-                            'summary': summary,
-                            'lat': v.get('lat'),
-                            'lng': v.get('lng')
-                        }
-                if weather_entries:
-                    results.setdefault('context', {})['final_weather_summary'] = weather_entries
-            except Exception:
-                pass
+            results = self._summarize_weather(results)
 
             return results
 
@@ -1157,13 +1491,13 @@ Analyze the plan and current state, then execute the appropriate tools.
 
             try:
                 if action == "Geolocate":
-                    result = geolocate_user.invoke({})
+                    result = geolocate_user.func()
                 elif action == "Geocode":
-                    result = geocode_place.invoke({"address": args.get("address", args.get('query', ''))})
+                    result = geocode_place.func(address=args.get("address", args.get('query', '')))
                 elif action == "ReverseGeocode":
                     lat = args.get("lat") or (current_slots.get('origin') or {}).get('lat')
                     lng = args.get("lng") or (current_slots.get('origin') or {}).get('lng')
-                    result = reverse_geocode.invoke({"lat": lat, "lng": lng}) if lat and lng else None
+                    result = reverse_geocode.func(lat=lat, lng=lng) if lat and lng else None
                 elif action == "Weather":
                     # Support coords dict, lat/lng fields, slot lookup, and address-based geocoding
                     units = (world_state.context.get('units') or world_state.user.get('units') or 'imperial')
@@ -1260,7 +1594,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                         lng = lng or s.get('lng')
                     if (lat is None or lng is None) and args.get('address'):
                         try:
-                            geocode_res = geocode_place.invoke({"address": args.get('address'), "slot": args.get('slot', 'destination')})
+                            geocode_res = geocode_place.func(address=args.get('address'), slot=args.get('slot', 'destination'))
                             gslots = geocode_res.get('slots', {})
                             if gslots:
                                 first_slot = next(iter(gslots.values()))
@@ -1281,7 +1615,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                         origin_source = origin_slot.get('__source') if isinstance(origin_slot, dict) else None
                         if not origin_has_coords or origin_source == 'geocode':
                             try:
-                                geo_res = geolocate_user.invoke({})
+                                geo_res = geolocate_user.func()
                                 # merge and update current_slots
                                 if isinstance(geo_res, dict):
                                     try:
@@ -1303,7 +1637,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                     except Exception:
                         pass
 
-                    result = weather_current.invoke({"lat": lat, "lng": lng, "units": units}) if lat is not None and lng is not None else None
+                    result = weather_current.func(lat=lat, lng=lng, units=units) if lat is not None and lng is not None else None
                     # rename lastWeather key if present using unique/disambiguating keys
                     if result and 'context' in result and 'lastWeather' in result['context']:
                         existing_ctx = results.get('context', {}) if isinstance(results, dict) else {}
@@ -1342,7 +1676,7 @@ Analyze the plan and current state, then execute the appropriate tools.
                     if isinstance(orig_val, dict) and orig_val.get('lat') is not None and orig_val.get('lng') is not None:
                         orig_val = f"{orig_val.get('lat')},{orig_val.get('lng')}"
 
-                    result = directions.invoke({"destination": dest_val, "origin": orig_val})
+                    result = directions.func(destination=dest_val, origin=orig_val)
                 else:
                     logger.warning(f"ExecutionAgent: Unknown action: {action}")
                     continue
@@ -1374,137 +1708,10 @@ Analyze the plan and current state, then execute the appropriate tools.
                 results["errors"].append(f"Error executing action {action}: {e}")
 
         # Synthesize weather summary for fallback execution results as well
-        try:
-            weather_entries = {}
-            for k, v in results.get('context', {}).items():
-                if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
-                    label = k.split('lastWeather_', 1)[1]
-                    temp = v.get('temp')
-                    summary = v.get('summary')
-                    weather_entries[label] = {
-                        'temp': temp,
-                        'summary': summary,
-                        'lat': v.get('lat'),
-                        'lng': v.get('lng')
-                    }
-            if weather_entries:
-                results.setdefault('context', {})['final_weather_summary'] = weather_entries
-        except Exception:
-            pass
-
+        results = _summarize_weather(results)
         return results
 
-    def _prepare_context_summary(self, world_state: WorldState, execution_results: dict) -> dict:
-        """Produce a compact summary of world_state + execution results for LLM prompt.
-
-        Uses compact_world_state to reduce prompt size and attaches tool execution summary.
-        """
-        try:
-            compact = compact_world_state(world_state)
-        except Exception:
-            compact = {}
-
-        summary = {
-            "compact_world": compact,
-            "tools_executed": execution_results.get('tools_executed', []),
-            "errors": execution_results.get('errors', [])
-        }
-        return summary
-
-    def _generate_fallback_response(self, world_state: WorldState, execution_results: dict) -> str:
-        """Create a simple human-readable response from execution results when LLM fails."""
-        # If reverse geocode result present, prefer a direct address reply
-        ctx = execution_results.get('context', {}) or {}
-        # If we have a final_response in context already, return it
-        if ctx.get('final_response'):
-            return ctx.get('final_response')
-
-        # Check for reverse geocode
-        rg = ctx.get('reverse_geocode_result') or ctx.get('reverse_geocode')
-        if rg and isinstance(rg, dict):
-            addr = rg.get('formatted_address') or rg.get('address') or rg.get('display_name')
-            if addr:
-                return f"You are near: {addr}."
-
-        # Check slots.origin
-        origin = execution_results.get('slots', {}).get('origin') or (world_state.slots.origin if hasattr(world_state.slots, 'origin') else world_state.slots.get('origin'))
-        if origin and origin.get('name'):
-            return f"You appear to be near {origin.get('name')} (lat={origin.get('lat')}, lng={origin.get('lng')})."
-
-        # Weather result
-        # Check both named and labeled weather keys
-        lw = ctx.get('lastWeather')
-        if lw and isinstance(lw, dict):
-            temp = lw.get('temp')
-            summary = lw.get('summary')
-            return f"Current conditions: {summary or 'unknown'}, temperature {temp if temp is not None else 'unknown'}."
-
-        # Look for labeled weather entries (lastWeather_<label>) and return the first one found
-        try:
-            for k, v in ctx.items():
-                if isinstance(k, str) and k.startswith('lastWeather_') and isinstance(v, dict):
-                    temp = v.get('temp')
-                    summary = v.get('summary')
-                    return f"Current conditions ({k.split('lastWeather_',1)[1]}): {summary or 'unknown'}, temperature {temp if temp is not None else 'unknown'}."
-        except Exception:
-            pass
-
-        # Directions or transit info
-        td = ctx.get('transit_directions') or ctx.get('directions')
-        if td and isinstance(td, dict):
-            # Prefer nested transit_directions when present
-            transit = td.get('transit_directions') if td.get('transit_directions') else td
-            try:
-                mode = transit.get('mode') or transit.get('travel_mode') or 'route'
-                total_duration = transit.get('total_duration') or transit.get('duration') or ''
-                total_distance = transit.get('total_distance') or transit.get('distance') or ''
-                parts = [f"I found {mode} directions for you."]
-                if total_duration:
-                    parts.append(f"Total time: {total_duration}.")
-                if total_distance:
-                    parts.append(f"Distance: {total_distance}.")
-
-                # Build step-by-step instructions
-                legs = transit.get('legs', []) or []
-                step_lines = []
-                step_i = 1
-                for leg in legs:
-                    steps = leg.get('steps', []) or []
-                    for s in steps:
-                        travel_mode = s.get('travel_mode') or s.get('mode') or ''
-                        duration = s.get('duration') or ''
-                        instr = s.get('instructions') or s.get('instruction') or s.get('summary') or ''
-                        if travel_mode and travel_mode.upper() == 'TRANSIT' or s.get('transit'):
-                            transit_info = s.get('transit', {}) or {}
-                            line = transit_info.get('line_name') or transit_info.get('line') or ''
-                            vehicle = transit_info.get('vehicle_type') or ''
-                            dep = transit_info.get('departure_stop') or transit_info.get('departure') or ''
-                            arr = transit_info.get('arrival_stop') or transit_info.get('arrival') or ''
-                            dep_time = transit_info.get('departure_time') or ''
-                            arr_time = transit_info.get('arrival_time') or ''
-                            step_lines.append(f"{step_i}. Take {vehicle} {line} from {dep} to {arr} ({dep_time} - {arr_time})")
-                        else:
-                            # Walking or other non-transit steps
-                            if instr:
-                                step_lines.append(f"{step_i}. {instr} {f'({duration})' if duration else ''}".strip())
-                            else:
-                                step_lines.append(f"{step_i}. {travel_mode or 'Proceed'} {f'for {duration}' if duration else ''}".strip())
-                        step_i += 1
-
-                if step_lines:
-                    parts.append("Steps:")
-                    parts.extend(step_lines)
-
-                return " ".join(parts)
-            except Exception:
-                return "I found directions for you. See details above."
-
-        # Last resort
-        errors = execution_results.get('errors', [])
-        if errors:
-            return f"I attempted to run some tools but encountered errors: {errors[0]}"
-
-        return "I couldn't determine your location. Please provide an address or allow location access."
+    # Note: _prepare_context_summary and _generate_fallback_response consolidated below.
 
     def _prepare_context_summary(self, world_state: WorldState, execution_results: dict) -> str:
         """Prepare a summary of execution results for LLM response generation."""

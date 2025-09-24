@@ -1,4 +1,4 @@
-# 🏗️ Vaya Public Transport Assistant - A2A LLM Architecture (2025)
+# 🏗️ Vaya Public Transport Assistant - A2A LLM Architecture
 
 ## Core Architecture
 
@@ -12,12 +12,12 @@
 - **Execution Agent (LLM):**
     - Receives the plan and current WorldState, reasons about dependencies, and selects which tools to execute (using LLM reasoning).
     - Uses a Gemini LLM to decide tool invocation order, fill arguments, and handle tool chaining.
-    - Executes tools (weather, geocode, directions, etc.), merges their outputs into WorldState, and generates the final user-facing response (via LLM or fallback).
-    - Handles placeholder substitution, slot memory, and error handling.
+    - Executes tools (weather, geocode, directions, places search, etc.), merges their outputs into WorldState, and generates the final user-facing response (via LLM or fallback).
+    - Handles placeholder substitution, slot memory, error handling, and context-aware follow-ups (see below).
 
 - **WorldState (Blackboard):**
     - Central, structured state shared by all agents.
-    - Includes user query, slots (origin/destination), context (plan, results, units, etc.), evidence, errors, and memory.
+    - Includes user query, slots (origin/destination), context (plan, results, units, last POI search, etc.), evidence, errors, and memory.
     - All state changes are made via deltaState patches and merged with `deepMerge()`.
 
 - **Coordinator:**
@@ -37,19 +37,54 @@ User Query → Planner (LLM) → Plan JSON (deltaState) → Executor (LLM) → T
 ### Tooling
 
 - Tools are implemented as LangChain `@tool` functions, returning WorldState-compatible patches.
-- Tools include: weather, geocode, geolocate, reverse geocode, directions, conversation.
+- Tools include: weather, geocode, geolocate, reverse geocode, directions, places search, conversation.
 - Tools are invoked by name and arguments as determined by the Executor LLM.
+- **Slot Reference Resolution:** The executor resolves slot references (e.g., 'origin', 'destination') in tool arguments to their actual values (lat/lng dicts) before tool invocation, ensuring tools always receive the correct data.
+
+### Context-Aware POI Search, Directions, and Chained Queries 
+
+- **POI Search (PlacesSearch):**
+    - If the user asks for a place (e.g., "nearest dunkin"), the system runs only the PlacesSearch tool and returns a summary of the nearest locations (name, address, distance).
+    - If the user query explicitly asks for directions (e.g., "how do I get to the nearest dunkin"), the system chains PlacesSearch and Directions, using the first result as the destination.
+    - The agent detects intent for directions using a keyword/phrase list and only invokes Directions if needed.
+
+- **Chained Queries & Context Memory:**
+    - The system stores the last PlacesSearch results in `world_state.context['last_places_results']`.
+    - If the user follows up with queries like "directions to #2" or "take me to the third one", the agent parses the ordinal/numbered reference, retrieves the correct place from memory, and patches the Directions step to use its details (placeId/address/lat,lng).
+    - This enables natural, conversational follow-ups without the user needing to repeat the full place name or address.
+
+- **Autopatching and Plan Correction:**
+    - The executor autopatches plans to insert PlacesSearch before Directions if the user query is a POI/brand and Directions lacks a concrete destination.
+    - Placeholder substitution supports array indexing (e.g., `${context.places.results[0].placeId}`) for robust data flow between tools.
 
 ### Error Handling
 
 - Tools raise exceptions on API failures; agents catch and append errors to `world_state.errors[]`.
 - Executor generates fallback responses if LLM or tool execution fails.
 - All errors and tool evidence are logged for debugging.
+- The system gracefully handles missing info, API failures, and ambiguous queries, always providing a helpful user response.
 
 ### Memory
 
 - Conversation memory is persisted in `data/conversation_memory.json` and loaded at startup.
 - WorldState context and slots can be restored between sessions.
+- The agent can handle context-aware, multi-turn conversations, remembering previous search results and user preferences.
+
+### Example User Flows
+
+- **POI Search Only:**
+    - User: "nearest mcdonalds?"
+    - System: Returns a list of the nearest McDonald's locations (no directions).
+
+- **Directions to POI:**
+    - User: "how do I get to the nearest mcdonalds?"
+    - System: Finds the nearest McDonald's, then provides directions from the user's current location.
+
+- **Chained Query:**
+    - User: "nearest dunkin?"
+    - System: Returns a list of the nearest Dunkin' locations.
+    - User: "directions to #2"
+    - System: Provides directions to the second Dunkin' in the previous list.
 
 ### Key Files
 
@@ -59,11 +94,12 @@ User Query → Planner (LLM) → Plan JSON (deltaState) → Executor (LLM) → T
 - `agents/tools/`: Tool implementations.
 - `utils/contracts.py`: Pydantic models for WorldState, Slots, etc.
 - `utils/state.py`: State merging logic (`deepMerge`).
+- `utils/logger.py`: Centralized logging configuration.
 
 ### Notable Implementation Details
 
-- The Synthesis Agent is now merged into the Executor; the Executor LLM produces the final natural-language response.
 - The system is fully LLM-driven for both planning and tool selection.
+- The Executor Agent/LLM produces the final natural-language response.
 - All state is managed via structured patches and merged into the canonical WorldState.
 - The architecture is modular and easily extensible for new tools or agent types.
 - Ambiguous results (multiple locations)
@@ -119,7 +155,8 @@ class WorldState(BaseModel):
         "plan": {"steps": [], "status": "none"},
         "completed_steps": [],
         "lastWeather": {},
-        "units": "imperial"
+        "units": "imperial",
+        "last_places_results": []  # Stores last POI search results for context-aware follow-ups
     }
     evidence: Dict[str, Any] = Field(default_factory=dict)
     errors: List[str] = Field(default_factory=list)
@@ -131,6 +168,7 @@ class WorldState(BaseModel):
 - **Immutable Updates**: Changes tracked via deepMerge()
 - **Structured Sharing**: Clear format for different data types
 - **Memory Integration**: Conversation history and preferences
+- **Context-Aware POI Memory**: Enables chained queries and follow-ups referencing previous search results
 
 ### API Integration Architecture
 
@@ -188,7 +226,7 @@ if tool_failed:
 
 1. **Emergent Intelligence**: Agents solve problems creatively through collaboration
 2. **Dynamic Replanning**: Real-time plan modification without restart
-3. **Memory-Augmented Conversations**: Context-aware responses with preference learning
+3. **Memory-Augmented Conversations**: Context-aware responses with preference learning and POI memory
 4. **API Resilience**: Multiple fallback mechanisms for reliability
 5. **Peer-to-Peer Coordination**: Direct agent communication without rigid hierarchies
 
@@ -197,8 +235,8 @@ if tool_failed:
 #### Core Components
 - `main.py`: CLI interface and system bootstrap
 - `agents/coordinator.py`: A2A coordinator managing agent interactions
-- `agents/agents.py`: Three specialized agents (Planning, Execution, Synthesis)
-- `agents/tools/`: API integration tools (weather, location)
+- `agents/agents.py`: Planning and Execution agents (Synthesis merged into Execution)
+- `agents/tools/`: API integration tools (weather, location, places)
 - `utils/contracts.py`: Pydantic data models and validation
 - `utils/state.py`: State management and deepMerge utilities
 - `utils/logger.py`: Centralized logging configuration
