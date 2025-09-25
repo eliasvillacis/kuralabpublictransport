@@ -1,4 +1,10 @@
+
 # Vaya Public Transport Assistant — Developer Cheat Sheet
+
+**Deployment:**
+- Production deployment is via [Render](https://render.com/) with a custom domain and web UI (React/Next.js or similar).
+- Routing, geocoding, and weather are handled via Google APIs and Gemini LLM.
+
 
 ## 🚦 System Overview & Architecture
 

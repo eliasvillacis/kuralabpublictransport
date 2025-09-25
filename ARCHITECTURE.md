@@ -1,4 +1,10 @@
+
 # 🏗️ Vaya Public Transport Assistant - A2A LLM Architecture
+
+**Deployment:**
+- Production deployment is via [Render](https://render.com/) with a custom domain and web UI (React/Next.js or similar).
+- Routing, geocoding, and weather are handled via Google APIs and Gemini LLM.
+
 
 ## Core Architecture
 
@@ -33,6 +39,7 @@ User Query → Planner (LLM) → Plan JSON (deltaState) → Executor (LLM) → T
 
 - All agent communication is via WorldState patches.
 - No direct tool selection or response synthesis is hardcoded; LLMs drive both planning and execution.
+
 
 ### Tooling
 
