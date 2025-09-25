@@ -96,27 +96,39 @@ Vaya uses a **two-agent A2A (Agent-to-Agent)** architecture powered by LLMs:
 
 ## 📋 Requirements
 
-### Option 1: Native Python
 - Python 3.8 or higher (3.11 recommended)
 - API Keys: Google Gemini API + Google Cloud API
 - Internet access for API calls
 
-### Option 2: Docker (Recommended)
-- Docker 20.10+ and Docker Compose 2.0+
-- Use the `.env` file for credentials (see `.env.example`)
+## 🏁 Deployment & Testing
 
-**Benefits of Docker:** reproducible environment, easy deployments, and no local Python version conflicts.
+Vaya can be deployed and tested locally or in Docker. Both methods are tested and supported.
 
-## 🐳 Docker (quick)
+### Native Python
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Copy `.env.example` to `.env` and add your API keys.
+3. Run:
+   ```bash
+   python main.py
+   ```
 
-Copy `.env.example` to `.env`, fill in API keys, then build and start with Docker Compose:
+### Docker
+1. Copy `.env.example` to `.env` and add your API keys.
+2. Build and start:
+   ```bash
+   docker-compose up --build
+   ```
 
-```bash
-cp .env.example .env
-docker-compose up --build
-```
+- Persistent data is stored in `./data` and `./logs`.
+- To run tests:
+   ```bash
+   pytest
+   ```
 
-Persistent data (conversation memory) and logs are stored in `./data` and `./logs` via volumes.
+Deployment is tested for both methods. If you encounter issues, check logs in `logs/app.log` or open an issue.
 
 ## 🛠️ Advanced Usage
 
