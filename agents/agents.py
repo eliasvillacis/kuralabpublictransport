@@ -190,6 +190,21 @@ Available actions: Geolocate, Geocode, ReverseGeocode, Weather, Directions, Conv
 Return ONLY a valid JSON object with a 'steps' list, 'status', and 'confidence'.
 See examples below for format. Use memory to resolve pronouns if present.
 
+
+IMPORTANT: If the user sends a greeting, small talk, or any non-transportation-specific message (e.g., "hi", "hello", "how are you", "thanks", "tell me a joke"), ALWAYS return a plan with a single step:
+    1. Conversation (with the user's message as the argument)
+
+Example:
+User: "hi"
+Plan:
+{
+    "steps": [
+        {"action": "Conversation", "args": {"message": "hi"}}
+    ],
+    "status": "incomplete",
+    "confidence": 1.0
+}
+
 IMPORTANT: If the user asks 'where am I', 'what is my location', or similar, ALWAYS return a plan with these steps:
     1. Geolocate
     2. ReverseGeocode
@@ -377,7 +392,15 @@ class ExecutionAgent(BaseAgent):
             pass
 
         # Generate final response using LLM
-        if self.llm:
+
+        # Prioritize conversation_response if present
+        conversation = execution_results.get('context', {}).get('conversation_response')
+        if conversation and conversation.get('response_text'):
+            final_response = conversation['response_text']
+        else:
+            final_response = None
+
+        if self.llm and not final_response:
             try:
                 logger.info("ExecutionAgent: Generating final response")
                 context_summary = self._prepare_context_summary(world_state, execution_results)
@@ -443,33 +466,36 @@ Tool execution results: {context_summary}
                     )
                 except Exception:
                     pass
-
-                delta_state = {
-                    "context": {
-                        "final_response": final_response,
-                        "execution_result": {
-                            "status": "success",
-                            "method": "llm_tool_selection_response_generation",
-                            "tools_executed": len(execution_results.get("tools_executed", []))
-                        },
-                        "execution_timestamp": str(datetime.utcnow()),
-                        "agent": self.name
-                    }
-                    ,
-                    "slots": execution_results.get('slots', {})
-                }
-
-                # Merge execution results into context
-                for key, value in execution_results.get("context", {}).items():
-                    delta_state["context"][key] = value
-
-                return {
-                    "deltaState": delta_state,
-                    "snippet": f"Executed {len(execution_results.get('tools_executed', []))} tools, generated response"
-                }
-
             except Exception as e:
                 logger.warning(f"ExecutionAgent: LLM response generation failed: {e}")
+
+        if not final_response:
+            # Fallback: Generate simple response from execution results
+            logger.info("ExecutionAgent: Using fallback response generation")
+            final_response = self._generate_fallback_response(world_state, execution_results)
+
+        delta_state = {
+            "context": {
+                "final_response": final_response,
+                "execution_result": {
+                    "status": "success",
+                    "method": "llm_tool_selection_response_generation",
+                    "tools_executed": len(execution_results.get("tools_executed", []))
+                },
+                "execution_timestamp": str(datetime.utcnow()),
+                "agent": self.name
+            },
+            "slots": execution_results.get('slots', {})
+        }
+
+        # Merge execution results into context
+        for key, value in execution_results.get("context", {}).items():
+            delta_state["context"][key] = value
+
+        return {
+            "deltaState": delta_state,
+            "snippet": f"Executed {len(execution_results.get('tools_executed', []))} tools, generated response"
+        }
 
         # Fallback: Generate simple response from execution results
         logger.info("ExecutionAgent: Using fallback response generation")
