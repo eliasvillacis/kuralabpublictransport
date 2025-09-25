@@ -103,5 +103,3 @@
 - Transit API subscriptions
 - Mental health content consultant
 
----
-*Minimal PRD based on actual codebase analysis*
