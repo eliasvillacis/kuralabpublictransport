@@ -1,8 +1,14 @@
+
 # 🚶‍♀️ Vaya - Your Urban Navigation Companion
 
 **A lightweight, AI-powered complement to traditional navigation apps.** Get real-time weather, location info, and navigation guidance without draining your battery or overheating your phone.
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+
+**Deployment:**
+- Production deployment is via [Render](https://render.com/) with a custom domain and web UI (React/Next.js or similar).
+- Routing, geocoding, and weather are handled via Google APIs and Gemini LLM.
+
 
 ## ✨ What is Vaya?
 
@@ -100,11 +106,17 @@ Vaya uses a **two-agent A2A (Agent-to-Agent)** architecture powered by LLMs:
 - API Keys: Google Gemini API + Google Cloud API
 - Internet access for API calls
 
+
 ## 🏁 Deployment & Testing
 
-Vaya can be deployed and tested locally or in Docker. Both methods are tested and supported.
+Vaya is deployed on [Render](https://render.com/) with a web UI (React/Next.js or similar) and custom domain. Local CLI and Docker remain available for development and testing.
 
-### Native Python
+### Production (Render + Web UI)
+- Deploy backend to Render, connect to your custom domain.
+- Web UI (React/Next.js) communicates with backend API.
+- All user interaction is via the web interface; no SMS or phone integration.
+
+### Local CLI
 1. Install dependencies:
    ```bash
    pip install -r requirements.txt
@@ -115,7 +127,7 @@ Vaya can be deployed and tested locally or in Docker. Both methods are tested an
    python main.py
    ```
 
-### Docker
+### Docker (for dev/testing)
 1. Copy `.env.example` to `.env` and add your API keys.
 2. Build and start:
    ```bash
@@ -128,7 +140,7 @@ Vaya can be deployed and tested locally or in Docker. Both methods are tested an
    pytest
    ```
 
-Deployment is tested for both methods. If you encounter issues, check logs in `logs/app.log` or open an issue.
+If you encounter issues, check logs in `logs/app.log` or open an issue.
 
 ## 🛠️ Advanced Usage
 

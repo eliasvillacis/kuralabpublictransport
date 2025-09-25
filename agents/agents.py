@@ -1,10 +1,34 @@
-﻿# Vaya Public Transport Assistant - Agent Architecture
+﻿
+# ===============================
+# Vaya Public Transport Assistant - Agent Architecture
+# ===============================
 #
-# Two-agent system:
-# - Planner (LLM): Produces structured JSON plans for user queries
-# - Executor (LLM + tools): Executes plan steps and generates final responses
+# This file implements the core agent logic for the Vaya public transport assistant.
+# The system uses a two-agent architecture:
 #
-# WorldState is the shared blackboard; agents communicate via deltaState patches.
+#   1. PlanningAgent (LLM):
+#      - Receives the user query and current world state (memory, slots, context).
+#      - Uses an LLM to generate a structured plan (JSON) describing which tools to call and in what order.
+#      - Handles slot filling, pronoun resolution, and ambiguous queries using LLM reasoning and prompt engineering.
+#      - Returns a plan as a list of steps, each with an action/tool and arguments.
+#
+#   2. ExecutionAgent (LLM + tools):
+#      - Receives the plan and executes each step, calling the appropriate tool/module.
+#      - Handles slot reference resolution, tool output merging, and error handling.
+#      - Uses LLM reasoning to adaptively execute plans, patch tool arguments, and generate the final user-facing response.
+#      - Ensures slots are updated and persisted for future queries (e.g., origin/destination).
+#
+# The agents communicate via a shared WorldState (blackboard), which tracks slots (origin, destination, etc.),
+# context (recent tool outputs), and the current plan. Each agent produces a deltaState patch describing its changes.
+#
+# Key Concepts:
+# - Tools: Modular functions for geolocation, geocoding, directions, weather, places, and conversation.
+# - Slot System: Named slots (origin, destination, etc.) are used to pass locations and context between tools and agents.
+# - LLM Reasoning: Both agents use LLMs for plan generation, tool selection, and response synthesis, with prompt engineering to guide behavior.
+# - Heuristic Guards: The executor includes logic to ensure correct slot usage, avoid stale data, and patch plans for ambiguous or underspecified queries.
+#
+# See section comments below for details on each class and major function.
+
 
 
 from abc import ABC, abstractmethod
@@ -51,6 +75,9 @@ def resolve_tool_name(name: str) -> str:
 
 
 class BaseAgent(ABC):
+    # -----------------------------
+    # BaseAgent: Abstract base class for all agents
+    # -----------------------------
     """Abstract base class for all agents in the system."""
 
     def __init__(self, name: str, model_name: str = "gemini-1.5-flash", temperature: float = 0.2):
@@ -147,6 +174,9 @@ class BaseAgent(ABC):
 
 
 class PlanningAgent(BaseAgent):
+    # -----------------------------
+    # PlanningAgent: Uses LLM to generate structured tool plans from user queries
+    # -----------------------------
     """LLM-powered agent that creates structured execution plans for user queries."""
 
     def __init__(self):
@@ -158,7 +188,23 @@ You are the Planning Agent. Analyze the user query and create a structured execu
 
 Available actions: Geolocate, Geocode, ReverseGeocode, Weather, Directions, Conversation.
 Return ONLY a valid JSON object with a 'steps' list, 'status', and 'confidence'.
-See examples in the prompt for format. Use memory to resolve pronouns if present.
+See examples below for format. Use memory to resolve pronouns if present.
+
+IMPORTANT: If the user asks 'where am I', 'what is my location', or similar, ALWAYS return a plan with these steps:
+    1. Geolocate
+    2. ReverseGeocode
+
+Example:
+User: "where am I?"
+Plan:
+{
+    "steps": [
+        {"action": "Geolocate", "args": {}},
+        {"action": "ReverseGeocode", "args": {}}
+    ],
+    "status": "incomplete",
+    "confidence": 1.0
+}
 
 IMPORTANT: If the user asks for weather 'near me', 'here', or similar, always include a Geolocate step before Weather, regardless of any previous location slots.
 
@@ -168,7 +214,7 @@ Recent memory: {memory}
 Query: {query}
 Return only the JSON, no other text.
 """
-        )
+                )
 
     def get_name(self) -> str:
         """Return the agent's name."""
@@ -218,6 +264,9 @@ Return only the JSON, no other text.
 
 
 class ExecutionAgent(BaseAgent):
+    # -----------------------------
+    # ExecutionAgent: Executes tool plans, manages slots, and generates final responses
+    # -----------------------------
     """LLM-powered agent that executes plan steps and generates the final response."""
 
     def __init__(self):
