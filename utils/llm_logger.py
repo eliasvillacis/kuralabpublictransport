@@ -10,10 +10,29 @@ def log_llm_usage(agent: str, model: str, usage: Dict[str, int], rates: Dict[str
     usage should contain keys: input_tokens, output_tokens, total_tokens
     """
     if rates is None:
-        rates = {
-            'input': 0.00001875,
-            'output': 0.000075
-        }
+        # Default rates for Gemini 1.5 Flash (USD per token)
+        # $0.075 in / $0.30 out per 1M tokens (≤128k context)
+        # $0.15 in / $0.60 out per 1M tokens (>128k context)
+        # Convert to per-token rates
+        model_lc = (model or '').lower()
+        context_size = usage.get('context_window', 0)  # If available
+        if 'gemini-1.5-flash' in model_lc:
+            if context_size and context_size > 128_000:
+                rates = {
+                    'input': 0.00000015,   # $0.15 / 1M
+                    'output': 0.00000060   # $0.60 / 1M
+                }
+            else:
+                rates = {
+                    'input': 0.000000075,  # $0.075 / 1M
+                    'output': 0.00000030   # $0.30 / 1M
+                }
+        else:
+            # Fallback: use OpenAI GPT-4 Turbo rates as a placeholder (update as needed)
+            rates = {
+                'input': 0.000010,  # $0.01 / 1K
+                'output': 0.000030  # $0.03 / 1K
+            }
 
     input_tokens = usage.get('input_tokens', 0)
     output_tokens = usage.get('output_tokens', 0)
